@@ -1219,6 +1219,7 @@ proxy-groups:
       - ss2
       - vmess1
     # tolerance: 150
+    # policy-priority: "Premium:0.1;Hong Kong:0.2;" # 仅支持 url-test，左侧为正则，右侧为正浮点系数，比较值 = 真实延迟 * 系数，命中多条时取最小系数
     # lazy: true
     # expected-status: 204 # 当健康检查返回状态码与期望值不符时，认为节点不可用
     url: "https://cp.cloudflare.com/generate_204"

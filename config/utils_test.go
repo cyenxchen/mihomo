@@ -77,3 +77,76 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestParseProxiesPolicyPriority(t *testing.T) {
+	testCases := []struct {
+		testName    string
+		group       []map[string]any
+		errContains string
+	}{
+		{
+			testName: "ValidURLTestPolicyPriority",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0.1;Hong Kong:0.2;",
+				},
+			},
+		},
+		{
+			testName: "InvalidPolicyPriorityType",
+			group: []map[string]any{
+				{
+					"name":            "manual",
+					"type":            "select",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0.1;",
+				},
+			},
+			errContains: "policy-priority only supports url-test",
+		},
+		{
+			testName: "InvalidPolicyPriorityFactor",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0;",
+				},
+			},
+			errContains: "must be a finite number greater than 0",
+		},
+		{
+			testName: "InvalidPolicyPriorityRegex",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "(:0.1;",
+				},
+			},
+			errContains: "invalid policy-priority regex",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "test-proxy", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+				},
+				ProxyGroup: testCase.group,
+			}
+			_, _, err := parseProxies(&config)
+			if testCase.errContains == "" {
+				assert.NoError(t, err, testCase.testName)
+			} else {
+				assert.ErrorContains(t, err, testCase.errContains, testCase.testName)
+			}
+		})
+	}
+}
