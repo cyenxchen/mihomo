@@ -29,6 +29,7 @@ type GroupCommonOption struct {
 	Use                 []string `group:"use,omitempty"`
 	URL                 string   `group:"url,omitempty"`
 	Interval            int      `group:"interval,omitempty"`
+	Tolerance           int      `group:"tolerance,omitempty"`
 	TestTimeout         int      `group:"timeout,omitempty"`
 	MaxFailedTimes      int      `group:"max-failed-times,omitempty"`
 	Lazy                bool     `group:"lazy,omitempty"`
@@ -37,6 +38,7 @@ type GroupCommonOption struct {
 	ExcludeFilter       string   `group:"exclude-filter,omitempty"`
 	ExcludeType         string   `group:"exclude-type,omitempty"`
 	ExpectedStatus      string   `group:"expected-status,omitempty"`
+	PolicyPriority      string   `group:"policy-priority,omitempty"`
 	IncludeAll          bool     `group:"include-all,omitempty"`
 	IncludeAllProxies   bool     `group:"include-all-proxies,omitempty"`
 	IncludeAllProviders bool     `group:"include-all-providers,omitempty"`
@@ -69,6 +71,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	groupName := groupOption.Name
+	if groupOption.PolicyPriority != "" && groupOption.Type != "url-test" {
+		return nil, fmt.Errorf("%s: policy-priority only supports url-test", groupName)
+	}
 
 	providers := []P.ProxyProvider{}
 
@@ -175,7 +180,10 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	var group C.ProxyAdapter
 	switch groupOption.Type {
 	case "url-test":
-		opts := parseURLTestOption(config)
+		opts, err := parseURLTestOption(groupOption)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", groupName, err)
+		}
 		group = NewURLTest(groupOption, providers, opts...)
 	case "select":
 		group = NewSelector(groupOption, providers)
