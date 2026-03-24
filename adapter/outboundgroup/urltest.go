@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/metacubex/mihomo/common/callback"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/singledo"
@@ -22,12 +27,25 @@ func urlTestWithTolerance(tolerance uint16) urlTestOption {
 	}
 }
 
+func urlTestWithPolicyPriority(policyPriority []policyPriorityRule) urlTestOption {
+	return func(u *URLTest) {
+		u.policyPriority = policyPriority
+	}
+}
+
+type policyPriorityRule struct {
+	pattern string
+	regex   *regexp2.Regexp
+	factor  float64
+}
+
 type URLTest struct {
 	*GroupBase
 	selected       string
 	testUrl        string
 	expectedStatus string
 	tolerance      uint16
+	policyPriority []policyPriorityRule
 	disableUDP     bool
 	Hidden         bool
 	Icon           string
@@ -122,19 +140,15 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 		}
 
 		fast := proxies[0]
-		minDelay := fast.LastDelayForTestUrl(u.testUrl)
-		fastNotExist := true
+		minDelay := u.delayForComparison(fast)
+		fastNotExist := u.fastNode != nil && fast.Name() != u.fastNode.Name()
 
 		for _, proxy := range proxies[1:] {
 			if u.fastNode != nil && proxy.Name() == u.fastNode.Name() {
 				fastNotExist = false
 			}
 
-			if !proxy.AliveForTestUrl(u.testUrl) {
-				continue
-			}
-
-			delay := proxy.LastDelayForTestUrl(u.testUrl)
+			delay := u.delayForComparison(proxy)
 			if delay < minDelay {
 				fast = proxy
 				minDelay = delay
@@ -142,7 +156,7 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 
 		}
 		// tolerance
-		if u.fastNode == nil || fastNotExist || !u.fastNode.AliveForTestUrl(u.testUrl) || u.fastNode.LastDelayForTestUrl(u.testUrl) > fast.LastDelayForTestUrl(u.testUrl)+u.tolerance {
+		if u.fastNode == nil || fastNotExist || !u.fastNode.AliveForTestUrl(u.testUrl) || u.delayForComparison(u.fastNode) > minDelay+float64(u.tolerance) {
 			u.fastNode = fast
 		}
 		return u.fastNode, nil
@@ -197,17 +211,86 @@ func (u *URLTest) URLTest(ctx context.Context, url string, expectedStatus utils.
 	return u.GroupBase.URLTest(ctx, u.testUrl, expectedStatus)
 }
 
-func parseURLTestOption(config map[string]any) []urlTestOption {
+func (u *URLTest) delayForComparison(proxy C.Proxy) float64 {
+	if !proxy.AliveForTestUrl(u.testUrl) {
+		return math.Inf(1)
+	}
+
+	delay := float64(proxy.LastDelayForTestUrl(u.testUrl))
+	factor := 1.0
+	matched := false
+	for _, policy := range u.policyPriority {
+		if match, _ := policy.regex.MatchString(proxy.Name()); match {
+			if !matched || policy.factor < factor {
+				factor = policy.factor
+				matched = true
+			}
+		}
+	}
+	if !matched {
+		return delay
+	}
+	return delay * factor
+}
+
+func parseURLTestOption(option *GroupCommonOption) ([]urlTestOption, error) {
 	opts := []urlTestOption{}
 
 	// tolerance
-	if elm, ok := config["tolerance"]; ok {
-		if tolerance, ok := elm.(int); ok {
-			opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
-		}
+	if option.Tolerance != 0 {
+		opts = append(opts, urlTestWithTolerance(uint16(option.Tolerance)))
 	}
 
-	return opts
+	if strings.TrimSpace(option.PolicyPriority) != "" {
+		policyPriority, err := parsePolicyPriority(option.PolicyPriority)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, urlTestWithPolicyPriority(policyPriority))
+	}
+
+	return opts, nil
+}
+
+func parsePolicyPriority(raw string) ([]policyPriorityRule, error) {
+	entries := strings.Split(raw, ";")
+	policies := make([]policyPriorityRule, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		separator := strings.LastIndex(entry, ":")
+		if separator <= 0 || separator == len(entry)-1 {
+			return nil, fmt.Errorf("invalid policy-priority entry %q", entry)
+		}
+
+		pattern := strings.TrimSpace(entry[:separator])
+		if pattern == "" {
+			return nil, fmt.Errorf("invalid policy-priority entry %q", entry)
+		}
+
+		regex, err := regexp2.Compile(pattern, regexp2.None)
+		if err != nil {
+			return nil, fmt.Errorf("invalid policy-priority regex %q: %w", pattern, err)
+		}
+
+		factor, err := strconv.ParseFloat(strings.TrimSpace(entry[separator+1:]), 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid policy-priority factor in %q: %w", entry, err)
+		}
+		if math.IsNaN(factor) || math.IsInf(factor, 0) || factor <= 0 {
+			return nil, fmt.Errorf("invalid policy-priority factor in %q: must be a finite number greater than 0", entry)
+		}
+
+		policies = append(policies, policyPriorityRule{
+			pattern: pattern,
+			regex:   regex,
+			factor:  factor,
+		})
+	}
+	return policies, nil
 }
 
 func NewURLTest(option *GroupCommonOption, providers []P.ProxyProvider, options ...urlTestOption) *URLTest {
