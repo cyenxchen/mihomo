@@ -1,0 +1,184 @@
+name: Sync Upstream and Build
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建（忽略版本检查）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-and-build
+  cancel-in-progress: true
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+    steps:
+      - name: Check upstream release
+        id: check
+        run: |
+          UPSTREAM_TAG=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
+          echo "Upstream latest: ${UPSTREAM_TAG}"
+
+          FORK_TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
+          echo "Fork latest: ${FORK_TAG}"
+
+          echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
+
+          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "${{ inputs.force }}" == "true" ]; then
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "New version detected, will build."
+          else
+            echo "new_version=false" >> $GITHUB_OUTPUT
+            echo "Already up to date, skip."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        jobs:
+          - { goos: linux, goarch: amd64, goamd64: v2, output: amd64-v2 }
+          - { goos: windows, goarch: amd64, goamd64: v2, output: amd64-v2 }
+          - { goos: darwin, goarch: arm64, output: arm64 }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream and cherry-pick custom commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/MetaCubeX/mihomo.git || true
+          git fetch upstream --tags
+
+          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
+          git checkout -b build-branch "${UPSTREAM_TAG}"
+
+          CUSTOM_COMMIT=$(git log origin/Meta --grep="feat: add policy-priority for url-test" --format="%H" -1)
+          if [ -z "$CUSTOM_COMMIT" ]; then
+            echo "::error::Custom commit not found on origin/Meta"
+            exit 1
+          fi
+          echo "Cherry-picking custom commit: ${CUSTOM_COMMIT}"
+          git cherry-pick "${CUSTOM_COMMIT}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Apply Go patches
+        run: |
+          cd $(go env GOROOT)
+          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77731.patch
+          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77975.patch
+
+      - name: Set variables
+        run: |
+          echo "VERSION=${{ needs.check-upstream.outputs.upstream_tag }}-custom" >> $GITHUB_ENV
+          echo "BUILDTIME=$(date)" >> $GITHUB_ENV
+          echo "CGO_ENABLED=0" >> $GITHUB_ENV
+          echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+
+      - name: Update CA
+        run: |
+          sudo apt-get update && sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.jobs.goos }}
+          GOARCH: ${{ matrix.jobs.goarch }}
+          GOAMD64: ${{ matrix.jobs.goamd64 }}
+        run: |
+          go build -v -tags "with_gvisor" -trimpath \
+            -ldflags "-extldflags --static -X 'github.com/metacubex/mihomo/constant.Version=${{ env.VERSION }}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${{ env.BUILDTIME }}' -w -s -buildid="
+
+          if [ "${{ matrix.jobs.goos }}" = "windows" ]; then
+            mv mihomo.exe mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}.exe
+          else
+            mv mihomo mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}
+          path: mihomo-*
+
+  release:
+    needs: [check-upstream, build]
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bin/
+          merge-multiple: true
+
+      - name: Package
+        run: |
+          cd bin
+          # gzip linux and darwin
+          for f in mihomo-linux-* mihomo-darwin-*; do
+            [ -f "$f" ] && gzip -k "$f"
+          done
+          # zip windows
+          for f in mihomo-windows-*.exe; do
+            [ -f "$f" ] && zip "${f%.exe}.zip" "$f"
+          done
+          sha256sum mihomo-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+        run: |
+          gh release create "${UPSTREAM_TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "mihomo ${UPSTREAM_TAG} (custom)" \
+            --notes "基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test" \
+            bin/*.gz bin/*.zip bin/checksums.txt
+
+  update-branch:
+    needs: [check-upstream, release]
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Update Meta branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/MetaCubeX/mihomo.git || true
+          git fetch upstream --tags
+
+          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
+          git checkout -B Meta "${UPSTREAM_TAG}"
+
+          CUSTOM_COMMIT=$(git log origin/Meta --grep="feat: add policy-priority for url-test" --format="%H" -1)
+          git cherry-pick "${CUSTOM_COMMIT}"
+          git push origin Meta --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
