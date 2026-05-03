@@ -72,6 +72,10 @@ jobs:
             "feat: add policy-priority for url-test"
             "feat: add default selection for select groups"
             "ci: add workflow to sync upstream releases"
+            "fix(ci): cherry-pick select default customization"
+            "fix(ci): restore custom Go patch setup in sync workflow"
+            "fix(ci): preserve sync workflow customizations"
+            "docs: add repository guidance for coding agents"
           )
           for pattern in "${PATTERNS[@]}"; do
             COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
@@ -196,6 +200,10 @@ jobs:
             "feat: add policy-priority for url-test"
             "feat: add default selection for select groups"
             "ci: add workflow to sync upstream releases"
+            "fix(ci): cherry-pick select default customization"
+            "fix(ci): restore custom Go patch setup in sync workflow"
+            "fix(ci): preserve sync workflow customizations"
+            "docs: add repository guidance for coding agents"
           )
           for pattern in "${PATTERNS[@]}"; do
             COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
