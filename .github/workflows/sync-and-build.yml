@@ -14,6 +14,9 @@ concurrency:
   group: sync-and-build
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   check-upstream:
     runs-on: ubuntu-latest
@@ -32,7 +35,8 @@ jobs:
 
           echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
 
-          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "${{ inputs.force }}" == "true" ]; then
+          FORCE_BUILD="${{ github.event_name == 'workflow_dispatch' && inputs.force }}"
+          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "$FORCE_BUILD" == "true" ]; then
             echo "new_version=true" >> $GITHUB_OUTPUT
             echo "New version detected, will build."
           else
@@ -42,8 +46,59 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
+  prepare-source:
     needs: check-upstream
+    if: needs.check-upstream.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      custom_sha: ${{ steps.publish.outputs.custom_sha }}
+      temp_branch: ${{ steps.publish.outputs.temp_branch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Prepare custom source
+        id: prepare
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+        run: |
+          .github/scripts/prepare-custom-source.sh "${UPSTREAM_TAG}" custom-source
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+          go-version: '1.26'
+
+      - name: Fix issue77930 for Golang1.26
+        run: |
+          cd $(go env GOROOT)
+          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77930.patch
+
+      - name: Test custom source
+        run: go test ./adapter/outboundgroup ./config ./hub/executor
+
+      - name: Publish prepared source
+        id: publish
+        run: |
+          TEMP_BRANCH="ci/sync-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CUSTOM_SHA="${{ steps.prepare.outputs.custom_sha }}"
+
+          if [ "$(git rev-parse HEAD)" != "$CUSTOM_SHA" ]; then
+            echo "::error::Prepared source SHA changed before publish"
+            exit 1
+          fi
+
+          git push origin "HEAD:refs/heads/${TEMP_BRANCH}" --force
+          echo "custom_sha=${CUSTOM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "temp_branch=${TEMP_BRANCH}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [check-upstream, prepare-source]
     if: needs.check-upstream.outputs.new_version == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -55,37 +110,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
+          fetch-depth: 1
 
-      - name: Sync upstream and cherry-pick custom commits
+      - name: Verify prepared source
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git remote add upstream https://github.com/MetaCubeX/mihomo.git || true
-          git fetch upstream --tags --force
-
-          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
-          git checkout -b build-branch "${UPSTREAM_TAG}"
-
-          PATTERNS=(
-            "feat: add policy-priority for url-test"
-            "feat: add default selection for select groups"
-            "ci: add workflow to sync upstream releases"
-            "fix(ci): cherry-pick select default customization"
-            "fix(ci): restore custom Go patch setup in sync workflow"
-            "fix(ci): preserve sync workflow customizations"
-            "docs: add repository guidance for coding agents"
-          )
-          for pattern in "${PATTERNS[@]}"; do
-            COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
-            if [ -z "$COMMIT" ]; then
-              echo "::error::Custom commit not found for pattern: $pattern"
-              exit 1
-            fi
-            echo "Cherry-picking: $(git log --oneline -1 $COMMIT)"
-            git cherry-pick "$COMMIT"
-          done
+          test "$(git rev-parse HEAD)" = "${{ needs.prepare-source.outputs.custom_sha }}"
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
@@ -134,10 +164,16 @@ jobs:
           path: mihomo-*
 
   release:
-    needs: [check-upstream, build]
+    needs: [check-upstream, prepare-source, build]
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v4
         with:
           path: bin/
@@ -154,65 +190,80 @@ jobs:
           for f in mihomo-windows-*.exe; do
             [ -f "$f" ] && zip "${f%.exe}.zip" "$f"
           done
-          sha256sum mihomo-* > checksums.txt
+          shopt -s nullglob
+          assets=(mihomo-linux-*.gz mihomo-darwin-*.gz mihomo-windows-*.zip)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No release assets generated"
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > checksums.txt
           cat checksums.txt
 
-      - name: Delete existing release if any
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+          CUSTOM_SHA: ${{ needs.prepare-source.outputs.custom_sha }}
         run: |
-          gh release delete "${UPSTREAM_TAG}" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          RELEASE_TITLE="mihomo ${UPSTREAM_TAG} (custom)"
+          RELEASE_NOTES="基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups"
 
-      - name: Create Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
-        run: |
-          gh release create "${UPSTREAM_TAG}" \
+          git tag -f "${UPSTREAM_TAG}" "${CUSTOM_SHA}"
+          git push --force origin "refs/tags/${UPSTREAM_TAG}"
+
+          if gh release view "${UPSTREAM_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "${UPSTREAM_TAG}" \
+              --repo "${{ github.repository }}" \
+              --title "${RELEASE_TITLE}" \
+              --notes "${RELEASE_NOTES}" \
+              --target "${CUSTOM_SHA}"
+          else
+            gh release create "${UPSTREAM_TAG}" \
+              --repo "${{ github.repository }}" \
+              --verify-tag \
+              --title "${RELEASE_TITLE}" \
+              --notes "${RELEASE_NOTES}"
+          fi
+
+          gh release upload "${UPSTREAM_TAG}" \
             --repo "${{ github.repository }}" \
-            --title "mihomo ${UPSTREAM_TAG} (custom)" \
-            --notes "基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups" \
+            --clobber \
             bin/*.gz bin/*.zip bin/checksums.txt
 
   update-branch:
-    needs: [check-upstream, release]
+    needs: [check-upstream, prepare-source, release]
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
           fetch-depth: 0
           token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Update Meta branch
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          CUSTOM_SHA="${{ needs.prepare-source.outputs.custom_sha }}"
+          if [ "$(git rev-parse HEAD)" != "$CUSTOM_SHA" ]; then
+            echo "::error::Prepared source SHA changed before branch update"
+            exit 1
+          fi
 
-          git remote add upstream https://github.com/MetaCubeX/mihomo.git || true
-          git fetch upstream --tags --force
+          git fetch origin Meta:refs/remotes/origin/Meta --force
+          EXPECTED_META="$(git rev-parse origin/Meta)"
+          git push --force-with-lease=refs/heads/Meta:"${EXPECTED_META}" origin "HEAD:refs/heads/Meta"
 
-          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
-          git checkout -B Meta "${UPSTREAM_TAG}"
-
-          PATTERNS=(
-            "feat: add policy-priority for url-test"
-            "feat: add default selection for select groups"
-            "ci: add workflow to sync upstream releases"
-            "fix(ci): cherry-pick select default customization"
-            "fix(ci): restore custom Go patch setup in sync workflow"
-            "fix(ci): preserve sync workflow customizations"
-            "docs: add repository guidance for coding agents"
-          )
-          for pattern in "${PATTERNS[@]}"; do
-            COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
-            if [ -z "$COMMIT" ]; then
-              echo "::error::Custom commit not found for pattern: $pattern"
-              exit 1
-            fi
-            echo "Cherry-picking: $(git log --oneline -1 $COMMIT)"
-            git cherry-pick "$COMMIT"
-          done
-
-          git push origin Meta --force
+  cleanup-source:
+    needs: [prepare-source, build, release, update-branch]
+    if: ${{ always() && needs.prepare-source.result == 'success' && needs.prepare-source.outputs.temp_branch != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete prepared source branch
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          TEMP_BRANCH: ${{ needs.prepare-source.outputs.temp_branch }}
+        run: |
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${TEMP_BRANCH}" || true
