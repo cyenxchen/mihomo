@@ -68,7 +68,11 @@ jobs:
           UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
           git checkout -b build-branch "${UPSTREAM_TAG}"
 
-          PATTERNS=("feat: add policy-priority for url-test" "ci: add workflow to sync upstream releases")
+          PATTERNS=(
+            "feat: add policy-priority for url-test"
+            "feat: add default selection for select groups"
+            "ci: add workflow to sync upstream releases"
+          )
           for pattern in "${PATTERNS[@]}"; do
             COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
             if [ -z "$COMMIT" ]; then
@@ -164,7 +168,7 @@ jobs:
           gh release create "${UPSTREAM_TAG}" \
             --repo "${{ github.repository }}" \
             --title "mihomo ${UPSTREAM_TAG} (custom)" \
-            --notes "基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test" \
+            --notes "基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups" \
             bin/*.gz bin/*.zip bin/checksums.txt
 
   update-branch:
@@ -187,7 +191,11 @@ jobs:
           UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
           git checkout -B Meta "${UPSTREAM_TAG}"
 
-          PATTERNS=("feat: add policy-priority for url-test" "ci: add workflow to sync upstream releases")
+          PATTERNS=(
+            "feat: add policy-priority for url-test"
+            "feat: add default selection for select groups"
+            "ci: add workflow to sync upstream releases"
+          )
           for pattern in "${PATTERNS[@]}"; do
             COMMIT=$(git log origin/Meta --grep="$pattern" --format="%H" -1)
             if [ -z "$COMMIT" ]; then
