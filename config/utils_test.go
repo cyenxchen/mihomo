@@ -154,27 +154,41 @@ func TestParseProxiesPolicyPriority(t *testing.T) {
 }
 
 func TestParseProxiesSelectDefault(t *testing.T) {
-	config := RawConfig{
-		Proxy: []map[string]any{
-			{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
-			{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
-		},
-		ProxyGroup: []map[string]any{
-			{
-				"name":    "manual",
-				"type":    "select",
-				"default": "proxy-b",
-				"proxies": []string{"proxy-a", "proxy-b"},
-			},
-		},
+	testCases := []struct {
+		testName     string
+		defaultValue string
+		want         string
+	}{
+		{testName: "Exact", defaultValue: "proxy-b", want: "proxy-b"},
+		{testName: "Prefix", defaultValue: "proxy", want: "proxy-a"},
+		{testName: "Wildcard", defaultValue: "proxy-*", want: "proxy-a"},
 	}
 
-	proxies, _, err := parseProxies(&config)
-	require.NoError(t, err)
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+					{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+				},
+				ProxyGroup: []map[string]any{
+					{
+						"name":    "manual",
+						"type":    "select",
+						"default": testCase.defaultValue,
+						"proxies": []string{"proxy-a", "proxy-b"},
+					},
+				},
+			}
 
-	selector, ok := proxies["manual"].Adapter().(*outboundgroup.Selector)
-	require.True(t, ok)
-	assert.Equal(t, "proxy-b", selector.Now())
+			proxies, _, err := parseProxies(&config)
+			require.NoError(t, err)
+
+			selector, ok := proxies["manual"].Adapter().(*outboundgroup.Selector)
+			require.True(t, ok)
+			assert.Equal(t, testCase.want, selector.Now())
+		})
+	}
 }
 
 func TestParseProxiesSelectDefaultValidation(t *testing.T) {
@@ -191,7 +205,7 @@ func TestParseProxiesSelectDefaultValidation(t *testing.T) {
 				"default": "proxy-c",
 				"proxies": []string{"proxy-a", "proxy-b"},
 			},
-			errContains: "default proxy or prefix 'proxy-c' not found",
+			errContains: "default proxy, prefix, or wildcard 'proxy-c' not found",
 		},
 		{
 			testName: "DefaultOnlySupportsSelect",

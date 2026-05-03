@@ -195,9 +195,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		selector := NewSelector(groupOption, providers)
 		if groupOption.Default != "" && !selector.hasDefaultMatch(groupOption.Default) {
 			if len(groupOption.Use) == 0 {
-				return nil, fmt.Errorf("%s: default proxy or prefix '%s' not found", groupName, groupOption.Default)
+				return nil, fmt.Errorf("%s: default proxy, prefix, or wildcard '%s' not found", groupName, groupOption.Default)
 			}
-			log.Warnln("The select group [%s] default proxy or prefix [%s] is not currently available, fallback to the first proxy", groupName, groupOption.Default)
+			log.Warnln("The select group [%s] default proxy, prefix, or wildcard [%s] is not currently available, fallback to the first proxy", groupName, groupOption.Default)
 		}
 		group = selector
 	case "fallback":

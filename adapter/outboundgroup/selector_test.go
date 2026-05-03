@@ -164,6 +164,66 @@ func TestSelectorDefaultPrefixUsesFirstReachableCandidate(t *testing.T) {
 	assert.Equal(t, []string{"https://example.test/download", "https://example.test/download"}, urls)
 }
 
+func TestSelectorDefaultWildcardUsesFirstReachableCandidate(t *testing.T) {
+	first := newStubProxy("proxy-node-hk-1", "", 0, true)
+	second := newStubProxy("proxy-node-us-1", "", 0, true)
+	third := newStubProxy("proxy-node-hk-2", "", 0, true)
+
+	calls := make(chan string, 2)
+	oldProbe := selectorDefaultProbeDownload
+	selectorDefaultProbeDownload = func(_ context.Context, proxy C.Proxy, _ string, _ utils.IntRanges[uint16], _ time.Duration) (uint64, error) {
+		calls <- proxy.Name()
+		if proxy.Name() == "proxy-node-hk-2" {
+			return 1024, nil
+		}
+		return 0, errors.New("no speed")
+	}
+	defer func() {
+		selectorDefaultProbeDownload = oldProbe
+	}()
+
+	group := newTestSelector(t, &GroupCommonOption{
+		Name:    "manual",
+		Default: "proxy-node-hk-*",
+	}, first, second, third)
+	group.StartDefaultSelection()
+
+	require.Eventually(t, func() bool {
+		return group.Now() == "proxy-node-hk-2"
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"proxy-node-hk-1", "proxy-node-hk-2"}, []string{<-calls, <-calls})
+}
+
+func TestSelectorDefaultWildcardQuestionMarkDoesNotUsePrefixSemantics(t *testing.T) {
+	prefixOnly := newStubProxy("proxy?-literal", "", 0, true)
+	matched := newStubProxy("proxy1", "", 0, true)
+	unmatched := newStubProxy("proxy12", "", 0, true)
+
+	calls := make(chan string, 1)
+	oldProbe := selectorDefaultProbeDownload
+	selectorDefaultProbeDownload = func(_ context.Context, proxy C.Proxy, _ string, _ utils.IntRanges[uint16], _ time.Duration) (uint64, error) {
+		calls <- proxy.Name()
+		return 1024, nil
+	}
+	defer func() {
+		selectorDefaultProbeDownload = oldProbe
+	}()
+
+	group := newTestSelector(t, &GroupCommonOption{
+		Name:    "manual",
+		Default: "proxy?",
+	}, prefixOnly, matched, unmatched)
+	group.StartDefaultSelection()
+
+	select {
+	case call := <-calls:
+		assert.Equal(t, "proxy1", call)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for default wildcard probe")
+	}
+	assert.Equal(t, "proxy1", group.Now())
+}
+
 func TestSelectorDefaultPrefixFallsBackToLastCandidate(t *testing.T) {
 	first := newStubProxy("proxy-node-1", "", 0, true)
 	second := newStubProxy("proxy-node-2", "", 0, true)

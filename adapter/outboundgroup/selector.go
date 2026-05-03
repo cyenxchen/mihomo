@@ -14,6 +14,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/wildcard"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
@@ -168,7 +169,7 @@ func (s *Selector) hasDefaultMatch(name string) bool {
 		if proxy == nil {
 			continue
 		}
-		if proxy.Name() == name || strings.HasPrefix(proxy.Name(), name) {
+		if defaultPatternMatch(name, proxy.Name()) {
 			return true
 		}
 	}
@@ -191,7 +192,7 @@ func (s *Selector) resolveDefaultSelection(proxies []C.Proxy) C.Proxy {
 		}
 	}
 
-	candidates := s.defaultPrefixCandidates(proxies)
+	candidates := s.defaultPatternCandidates(proxies)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -201,13 +202,13 @@ func (s *Selector) resolveDefaultSelection(proxies []C.Proxy) C.Proxy {
 	return selected
 }
 
-func (s *Selector) defaultPrefixCandidates(proxies []C.Proxy) []C.Proxy {
+func (s *Selector) defaultPatternCandidates(proxies []C.Proxy) []C.Proxy {
 	var candidates []C.Proxy
 	for _, proxy := range proxies {
 		if proxy == nil {
 			continue
 		}
-		if strings.HasPrefix(proxy.Name(), s.defaultName) {
+		if defaultPatternMatch(s.defaultName, proxy.Name()) {
 			candidates = append(candidates, proxy)
 		}
 	}
@@ -225,15 +226,15 @@ func (s *Selector) StartDefaultSelection() {
 		return
 	}
 
-	candidates := s.defaultPrefixCandidates(proxies)
+	candidates := s.defaultPatternCandidates(proxies)
 	if len(candidates) == 0 || !s.markDefaultProbeStarted() {
 		return
 	}
 
 	s.setDefaultSelected(candidates[0].Name())
-	log.Infoln("The select group [%s] default prefix [%s] starts availability probing in background", s.Name(), s.defaultName)
+	log.Infoln("The select group [%s] default %s [%s] starts availability probing in background", s.Name(), defaultPatternKind(s.defaultName), s.defaultName)
 	go func() {
-		selected := s.selectDefaultPrefixCandidate(candidates)
+		selected := s.selectDefaultPatternCandidate(candidates)
 		s.setDefaultSelected(selected.Name())
 	}()
 }
@@ -250,7 +251,7 @@ func (s *Selector) defaultExactProxy(proxies []C.Proxy) C.Proxy {
 	return nil
 }
 
-func (s *Selector) selectDefaultPrefixCandidate(candidates []C.Proxy) C.Proxy {
+func (s *Selector) selectDefaultPatternCandidate(candidates []C.Proxy) C.Proxy {
 	last := candidates[len(candidates)-1]
 	probeURL := s.testUrl
 	if probeURL == "" {
@@ -262,14 +263,38 @@ func (s *Selector) selectDefaultPrefixCandidate(candidates []C.Proxy) C.Proxy {
 		size, err := selectorDefaultProbeDownload(ctx, proxy, probeURL, s.expectedStatus, selectorDefaultProbeDuration)
 		cancel()
 		if err == nil {
-			log.Infoln("The select group [%s] default prefix [%s] selected proxy [%s] after downloading %d bytes from %s", s.Name(), s.defaultName, proxy.Name(), size, probeURL)
+			log.Infoln("The select group [%s] default %s [%s] selected proxy [%s] after downloading %d bytes from %s", s.Name(), defaultPatternKind(s.defaultName), s.defaultName, proxy.Name(), size, probeURL)
 			return proxy
 		}
-		log.Warnln("The select group [%s] default prefix [%s] probe failed for proxy [%s]: %v", s.Name(), s.defaultName, proxy.Name(), err)
+		log.Warnln("The select group [%s] default %s [%s] probe failed for proxy [%s]: %v", s.Name(), defaultPatternKind(s.defaultName), s.defaultName, proxy.Name(), err)
 	}
 
-	log.Warnln("The select group [%s] default prefix [%s] has no reachable proxy, fallback to last matched proxy [%s]", s.Name(), s.defaultName, last.Name())
+	log.Warnln("The select group [%s] default %s [%s] has no reachable proxy, fallback to last matched proxy [%s]", s.Name(), defaultPatternKind(s.defaultName), s.defaultName, last.Name())
 	return last
+}
+
+func defaultPatternMatch(pattern, name string) bool {
+	if pattern == "" {
+		return false
+	}
+	if name == pattern {
+		return true
+	}
+	if defaultPatternHasWildcard(pattern) {
+		return wildcard.Match(pattern, name)
+	}
+	return strings.HasPrefix(name, pattern)
+}
+
+func defaultPatternHasWildcard(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?")
+}
+
+func defaultPatternKind(pattern string) string {
+	if defaultPatternHasWildcard(pattern) {
+		return "wildcard"
+	}
+	return "prefix"
 }
 
 func (s *Selector) selection() (string, bool) {
