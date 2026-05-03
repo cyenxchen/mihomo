@@ -1,6 +1,9 @@
 name: Sync Upstream and Build
 
 on:
+  push:
+    branches:
+      - Meta
   schedule:
     - cron: '0 */12 * * *'
   workflow_dispatch:
@@ -33,12 +36,25 @@ jobs:
           FORK_TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
           echo "Fork latest: ${FORK_TAG}"
 
+          FORK_TARGET=$(gh api "repos/${{ github.repository }}/releases/tags/${UPSTREAM_TAG}" --jq '.target_commitish' 2>/dev/null || echo "none")
+          echo "Fork release target for ${UPSTREAM_TAG}: ${FORK_TARGET}"
+
           echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
 
+          PUSH_BUILD=false
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${FORK_TARGET}" != "${{ github.sha }}" ]; then
+              PUSH_BUILD=true
+              echo "Meta changed since current custom release, will rebuild."
+            else
+              echo "Meta already matches current custom release target, skip push rebuild."
+            fi
+          fi
+
           FORCE_BUILD="${{ github.event_name == 'workflow_dispatch' && inputs.force }}"
-          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "$FORCE_BUILD" == "true" ]; then
+          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "$FORCE_BUILD" == "true" ] || [ "$PUSH_BUILD" == "true" ]; then
             echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "New version detected, will build."
+            echo "Build required."
           else
             echo "new_version=false" >> $GITHUB_OUTPUT
             echo "Already up to date, skip."

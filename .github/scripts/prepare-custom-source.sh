@@ -17,6 +17,14 @@ echo "Upstream tag: ${UPSTREAM_TAG}"
 echo "Source ref: ${SOURCE_REF}"
 echo "Target branch: ${TARGET_BRANCH}"
 
+if ! git config user.name >/dev/null; then
+  git config user.name "github-actions[bot]"
+fi
+
+if ! git config user.email >/dev/null; then
+  git config user.email "github-actions[bot]@users.noreply.github.com"
+fi
+
 if ! git remote get-url "${UPSTREAM_REMOTE}" >/dev/null 2>&1; then
   git remote add "${UPSTREAM_REMOTE}" "${UPSTREAM_URL}"
 fi
