@@ -4,16 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
 
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
+
+	"github.com/metacubex/http"
 )
+
+const (
+	selectorDefaultProbeDuration    = 3 * time.Second
+	selectorDefaultProbeIdleTimeout = time.Second
+)
+
+var selectorDefaultProbeDownload = probeSelectorDefaultDownload
 
 type Selector struct {
 	*GroupBase
 	disableUDP bool
-	selected   string
-	testUrl    string
+
+	selectedMux         sync.RWMutex
+	selected            string
+	defaultName         string
+	defaultManaged      bool
+	defaultProbeStarted bool
+
+	testUrl        string
+	expectedStatus utils.IntRanges[uint16]
 }
 
 // DialContext implements C.ProxyAdapter
@@ -78,7 +104,7 @@ func (s *Selector) Now() string {
 func (s *Selector) Set(name string) error {
 	for _, proxy := range s.GetProxies(false) {
 		if proxy.Name() == name {
-			s.selected = name
+			s.setSelected(name, false)
 			return nil
 		}
 	}
@@ -87,7 +113,7 @@ func (s *Selector) Set(name string) error {
 }
 
 func (s *Selector) ForceSet(name string) {
-	s.selected = name
+	s.setSelected(name, false)
 }
 
 // Unwrap implements C.ProxyAdapter
@@ -97,13 +123,195 @@ func (s *Selector) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 
 func (s *Selector) selectedProxy(touch bool) C.Proxy {
 	proxies := s.GetProxies(touch)
+	selected, defaultManaged := s.selection()
+	var fallback C.Proxy
 	for _, proxy := range proxies {
-		if proxy.Name() == s.selected {
+		if proxy == nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = proxy
+		}
+		if proxy.Name() == selected {
 			return proxy
 		}
 	}
 
+	if defaultManaged {
+		if proxy := s.resolveDefaultSelection(proxies); proxy != nil {
+			return proxy
+		}
+	}
+
+	if fallback != nil {
+		return fallback
+	}
+
 	return proxies[0]
+}
+
+func (s *Selector) hasProxy(name string) bool {
+	for _, proxy := range s.GetProxies(false) {
+		if proxy == nil {
+			continue
+		}
+		if proxy.Name() == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *Selector) hasDefaultMatch(name string) bool {
+	for _, proxy := range s.GetProxies(false) {
+		if proxy == nil {
+			continue
+		}
+		if proxy.Name() == name || strings.HasPrefix(proxy.Name(), name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *Selector) resolveDefaultSelection(proxies []C.Proxy) C.Proxy {
+	if s.defaultName == "" {
+		return nil
+	}
+
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		if proxy.Name() == s.defaultName {
+			s.setDefaultSelected(proxy.Name())
+			return proxy
+		}
+	}
+
+	candidates := s.defaultPrefixCandidates(proxies)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	selected := candidates[0]
+	s.setDefaultSelected(selected.Name())
+	return selected
+}
+
+func (s *Selector) defaultPrefixCandidates(proxies []C.Proxy) []C.Proxy {
+	var candidates []C.Proxy
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		if strings.HasPrefix(proxy.Name(), s.defaultName) {
+			candidates = append(candidates, proxy)
+		}
+	}
+	return candidates
+}
+
+func (s *Selector) StartDefaultSelection() {
+	if !s.isDefaultManaged() {
+		return
+	}
+
+	proxies := s.GetProxies(false)
+	if exact := s.defaultExactProxy(proxies); exact != nil {
+		s.setDefaultSelected(exact.Name())
+		return
+	}
+
+	candidates := s.defaultPrefixCandidates(proxies)
+	if len(candidates) == 0 || !s.markDefaultProbeStarted() {
+		return
+	}
+
+	s.setDefaultSelected(candidates[0].Name())
+	log.Infoln("The select group [%s] default prefix [%s] starts availability probing in background", s.Name(), s.defaultName)
+	go func() {
+		selected := s.selectDefaultPrefixCandidate(candidates)
+		s.setDefaultSelected(selected.Name())
+	}()
+}
+
+func (s *Selector) defaultExactProxy(proxies []C.Proxy) C.Proxy {
+	for _, proxy := range proxies {
+		if proxy == nil {
+			continue
+		}
+		if proxy.Name() == s.defaultName {
+			return proxy
+		}
+	}
+	return nil
+}
+
+func (s *Selector) selectDefaultPrefixCandidate(candidates []C.Proxy) C.Proxy {
+	last := candidates[len(candidates)-1]
+	probeURL := s.testUrl
+	if probeURL == "" {
+		probeURL = C.DefaultTestURL
+	}
+	for _, proxy := range candidates {
+		timeout := time.Duration(s.testTimeout)*time.Millisecond + selectorDefaultProbeDuration
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		size, err := selectorDefaultProbeDownload(ctx, proxy, probeURL, s.expectedStatus, selectorDefaultProbeDuration)
+		cancel()
+		if err == nil {
+			log.Infoln("The select group [%s] default prefix [%s] selected proxy [%s] after downloading %d bytes from %s", s.Name(), s.defaultName, proxy.Name(), size, probeURL)
+			return proxy
+		}
+		log.Warnln("The select group [%s] default prefix [%s] probe failed for proxy [%s]: %v", s.Name(), s.defaultName, proxy.Name(), err)
+	}
+
+	log.Warnln("The select group [%s] default prefix [%s] has no reachable proxy, fallback to last matched proxy [%s]", s.Name(), s.defaultName, last.Name())
+	return last
+}
+
+func (s *Selector) selection() (string, bool) {
+	s.selectedMux.RLock()
+	defer s.selectedMux.RUnlock()
+	return s.selected, s.defaultManaged
+}
+
+func (s *Selector) isDefaultManaged() bool {
+	s.selectedMux.RLock()
+	defer s.selectedMux.RUnlock()
+	return s.defaultManaged
+}
+
+func (s *Selector) setSelected(name string, defaultManaged bool) {
+	s.selectedMux.Lock()
+	defer s.selectedMux.Unlock()
+	s.selected = name
+	s.defaultManaged = defaultManaged
+	if !defaultManaged {
+		s.defaultProbeStarted = false
+	}
+}
+
+func (s *Selector) setDefaultSelected(name string) bool {
+	s.selectedMux.Lock()
+	defer s.selectedMux.Unlock()
+	if !s.defaultManaged {
+		return false
+	}
+	s.selected = name
+	return true
+}
+
+func (s *Selector) markDefaultProbeStarted() bool {
+	s.selectedMux.Lock()
+	defer s.selectedMux.Unlock()
+	if !s.defaultManaged || s.defaultProbeStarted {
+		return false
+	}
+	s.defaultProbeStarted = true
+	return true
 }
 
 func (s *Selector) Providers() []P.ProxyProvider {
@@ -115,7 +323,13 @@ func (s *Selector) Proxies() []C.Proxy {
 }
 
 func NewSelector(option *GroupCommonOption, providers []P.ProxyProvider) *Selector {
-	return &Selector{
+	selected := option.Default
+	defaultManaged := selected != ""
+	if selected == "" {
+		selected = "COMPATIBLE"
+	}
+
+	selector := &Selector{
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
 			Type:           C.Selector,
@@ -128,8 +342,124 @@ func NewSelector(option *GroupCommonOption, providers []P.ProxyProvider) *Select
 			MaxFailedTimes: option.MaxFailedTimes,
 			Providers:      providers,
 		}),
-		selected:   "COMPATIBLE",
-		disableUDP: option.DisableUDP,
-		testUrl:    option.URL,
+		selected:       selected,
+		defaultName:    option.Default,
+		defaultManaged: defaultManaged,
+		disableUDP:     option.DisableUDP,
+		testUrl:        option.URL,
+		expectedStatus: option.expectedStatus,
 	}
+
+	return selector
+}
+
+func probeSelectorDefaultDownload(ctx context.Context, proxy C.Proxy, rawURL string, expectedStatus utils.IntRanges[uint16], duration time.Duration) (uint64, error) {
+	metadata, err := metadataFromURL(rawURL)
+	if err != nil {
+		return 0, err
+	}
+
+	conn, err := proxy.DialContext(ctx, &metadata)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", "mihomo-select-default-probe")
+
+	tlsConfig, err := ca.GetTLSConfig(ca.Option{})
+	if err != nil {
+		return 0, err
+	}
+
+	used := false
+	transport := &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			if used {
+				return nil, errors.New("selector default probe only supports one connection")
+			}
+			used = true
+			return conn, nil
+		},
+		TLSClientConfig: tlsConfig,
+	}
+	defer transport.CloseIdleConnections()
+
+	client := http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if !expectedStatus.Check(uint16(resp.StatusCode)) {
+		return 0, fmt.Errorf("unexpected status code %d, expected %s", resp.StatusCode, expectedStatus.String())
+	}
+
+	buf := make([]byte, 32*1024)
+	start := time.Now()
+	deadline := start.Add(duration)
+	var total uint64
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(time.Now().Add(selectorDefaultProbeIdleTimeout)); err != nil {
+			log.Debugln("The select group default probe could not set read deadline for proxy [%s]: %v", proxy.Name(), err)
+		}
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			total += uint64(n)
+			continue
+		}
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return total, fmt.Errorf("no download bytes within %s", selectorDefaultProbeIdleTimeout)
+			}
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+	}
+
+	if total == 0 {
+		return 0, errors.New("download returned no bytes")
+	}
+
+	return total, nil
+}
+
+func metadataFromURL(rawURL string) (addr C.Metadata, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		default:
+			err = fmt.Errorf("%s scheme not support", rawURL)
+			return
+		}
+	}
+
+	err = addr.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port))
+	return
 }

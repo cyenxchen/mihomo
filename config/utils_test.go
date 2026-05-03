@@ -3,7 +3,9 @@ package config
 import (
 	"testing"
 
+	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateDialerProxies(t *testing.T) {
@@ -147,6 +149,74 @@ func TestParseProxiesPolicyPriority(t *testing.T) {
 			} else {
 				assert.ErrorContains(t, err, testCase.errContains, testCase.testName)
 			}
+		})
+	}
+}
+
+func TestParseProxiesSelectDefault(t *testing.T) {
+	config := RawConfig{
+		Proxy: []map[string]any{
+			{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+			{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+		},
+		ProxyGroup: []map[string]any{
+			{
+				"name":    "manual",
+				"type":    "select",
+				"default": "proxy-b",
+				"proxies": []string{"proxy-a", "proxy-b"},
+			},
+		},
+	}
+
+	proxies, _, err := parseProxies(&config)
+	require.NoError(t, err)
+
+	selector, ok := proxies["manual"].Adapter().(*outboundgroup.Selector)
+	require.True(t, ok)
+	assert.Equal(t, "proxy-b", selector.Now())
+}
+
+func TestParseProxiesSelectDefaultValidation(t *testing.T) {
+	testCases := []struct {
+		testName    string
+		group       map[string]any
+		errContains string
+	}{
+		{
+			testName: "DefaultProxyNotFound",
+			group: map[string]any{
+				"name":    "manual",
+				"type":    "select",
+				"default": "proxy-c",
+				"proxies": []string{"proxy-a", "proxy-b"},
+			},
+			errContains: "default proxy or prefix 'proxy-c' not found",
+		},
+		{
+			testName: "DefaultOnlySupportsSelect",
+			group: map[string]any{
+				"name":    "auto",
+				"type":    "url-test",
+				"default": "proxy-a",
+				"proxies": []string{"proxy-a", "proxy-b"},
+			},
+			errContains: "default only supports select",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+					{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+				},
+				ProxyGroup: []map[string]any{testCase.group},
+			}
+
+			_, _, err := parseProxies(&config)
+			assert.ErrorContains(t, err, testCase.errContains)
 		})
 	}
 }

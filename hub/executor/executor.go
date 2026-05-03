@@ -446,6 +446,7 @@ func updateProfile(cfg *config.Config) {
 	if profileCfg.StoreSelected {
 		patchSelectGroup(cfg.Proxies)
 	}
+	startSelectGroupDefault(cfg.Proxies)
 }
 
 func patchSelectGroup(proxies map[string]C.Proxy) {
@@ -466,6 +467,17 @@ func patchSelectGroup(proxies map[string]C.Proxy) {
 		}
 
 		selector.ForceSet(selected)
+	}
+}
+
+func startSelectGroupDefault(proxies map[string]C.Proxy) {
+	for _, outbound := range proxies {
+		selector, ok := outbound.Adapter().(outboundgroup.DefaultSelectAble)
+		if !ok {
+			continue
+		}
+
+		selector.StartDefaultSelection()
 	}
 }
 

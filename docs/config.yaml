@@ -1330,6 +1330,7 @@ proxy-groups:
   - name: Proxy
     type: select
     # disable-udp: true
+    # default: ss1 # 默认选择的节点或节点名前缀，前缀匹配会按当前排序探测可用性，若开启 profile.store-selected，缓存的选择优先
     proxies:
       - ss1
       - ss2
