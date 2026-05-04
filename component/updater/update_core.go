@@ -215,7 +215,12 @@ func sameCoreVersion(latestVersion string, currentVersion string) bool {
 
 func normalizeCoreVersionForCompare(version string) string {
 	version = normalizeGithubReleaseVersion(version)
-	return strings.TrimSuffix(version, "-custom")
+	// 自定义 fork 的版本格式形如 1.19.10-custom 或 1.19.10-custom.<n>.<sha>
+	// 比较版本时统一剥离 -custom 之后的所有内容，保证 fork build 与上游同 tag 视为同版本，避免被 updater 覆盖
+	if idx := strings.Index(version, "-custom"); idx >= 0 {
+		return version[:idx]
+	}
+	return version
 }
 
 func updaterPackageNames(mihomoBaseName string, latestVersion string) []string {

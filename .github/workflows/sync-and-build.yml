@@ -71,6 +71,8 @@ jobs:
     outputs:
       custom_sha: ${{ steps.publish.outputs.custom_sha }}
       temp_branch: ${{ steps.publish.outputs.temp_branch }}
+      commits_ahead: ${{ steps.publish.outputs.commits_ahead }}
+      short_sha: ${{ steps.publish.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -100,6 +102,8 @@ jobs:
 
       - name: Publish prepared source
         id: publish
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
         run: |
           TEMP_BRANCH="ci/sync-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CUSTOM_SHA="${{ steps.prepare.outputs.custom_sha }}"
@@ -109,9 +113,16 @@ jobs:
             exit 1
           fi
 
+          # 本地 patch 数（rebase 之后等于本地领先上游 tag 的提交数）
+          COMMITS_AHEAD="$(git rev-list --count "${UPSTREAM_TAG}..HEAD")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          echo "Commits ahead of ${UPSTREAM_TAG}: ${COMMITS_AHEAD}, short sha: ${SHORT_SHA}"
+
           git push origin "HEAD:refs/heads/${TEMP_BRANCH}" --force
           echo "custom_sha=${CUSTOM_SHA}" >> "$GITHUB_OUTPUT"
           echo "temp_branch=${TEMP_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "commits_ahead=${COMMITS_AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: [check-upstream, prepare-source]
@@ -147,7 +158,8 @@ jobs:
 
       - name: Set variables
         run: |
-          echo "VERSION=${{ needs.check-upstream.outputs.upstream_tag }}-custom" >> $GITHUB_ENV
+          # 形如 v1.19.10-custom.3.a1b2c3d，构建号反映本地领先上游的提交数，便于客户端识别新旧 build
+          echo "VERSION=${{ needs.check-upstream.outputs.upstream_tag }}-custom.${{ needs.prepare-source.outputs.commits_ahead }}.${{ needs.prepare-source.outputs.short_sha }}" >> $GITHUB_ENV
           echo "BUILDTIME=$(date)" >> $GITHUB_ENV
           echo "CGO_ENABLED=0" >> $GITHUB_ENV
           echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
@@ -220,9 +232,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
           CUSTOM_SHA: ${{ needs.prepare-source.outputs.custom_sha }}
+          COMMITS_AHEAD: ${{ needs.prepare-source.outputs.commits_ahead }}
+          SHORT_SHA: ${{ needs.prepare-source.outputs.short_sha }}
         run: |
-          RELEASE_TITLE="mihomo ${UPSTREAM_TAG} (custom)"
-          RELEASE_NOTES="基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups"
+          BUILD_TAG="custom.${COMMITS_AHEAD}.${SHORT_SHA}"
+          RELEASE_TITLE="mihomo ${UPSTREAM_TAG} (${BUILD_TAG})"
+          RELEASE_NOTES="基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups (build ${BUILD_TAG})"
 
           git tag -f "${UPSTREAM_TAG}" "${CUSTOM_SHA}"
           git push --force origin "refs/tags/${UPSTREAM_TAG}"

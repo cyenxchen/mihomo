@@ -39,6 +39,16 @@ func TestSameCoreVersionMatchesCustomForkRelease(t *testing.T) {
 			current: "v1.19.24-custom",
 			want:    false,
 		},
+		"custom build number matches upstream tag": {
+			latest:  "v1.19.24",
+			current: "v1.19.24-custom.3.a1b2c3d",
+			want:    true,
+		},
+		"newer release does not match custom build current": {
+			latest:  "v1.19.25",
+			current: "v1.19.24-custom.3.a1b2c3d",
+			want:    false,
+		},
 	}
 
 	for name, tt := range tests {
