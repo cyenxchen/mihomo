@@ -1,101 +1,78 @@
-<h1 align="center">
-  <img src="Meta.png" alt="Meta Kennel" width="200">
-  <br>Meta Kernel<br>
-</h1>
+# Meta Kernel (个人自用版)
 
-<h3 align="center">Another Mihomo Kernel.</h3>
+个人自用版本,相比原版多了以下功能:
 
-<p align="center">
-  <a href="https://goreportcard.com/report/github.com/MetaCubeX/mihomo">
-    <img src="https://goreportcard.com/badge/github.com/MetaCubeX/mihomo?style=flat-square">
-  </a>
-  <img src="https://img.shields.io/github/go-mod/go-version/MetaCubeX/mihomo/Alpha?style=flat-square">
-  <a href="https://github.com/MetaCubeX/mihomo/releases">
-    <img src="https://img.shields.io/github/release/MetaCubeX/mihomo/all.svg?style=flat-square">
-  </a>
-  <a href="https://github.com/MetaCubeX/mihomo">
-    <img src="https://img.shields.io/badge/release-Meta-00b4f0?style=flat-square">
-  </a>
-</p>
+## 1. `url-test` 组支持策略优先级 (`policy-priority`)
 
-## Features
+在 `url-test` 类型的代理组中新增 `policy-priority` 配置项,允许为匹配特定模式的节点设置延迟权重(倍率)。
+计算"最优节点"时会用 `实际延迟 × 权重` 来排序,权重小于 1 的节点更易胜出,大于 1 则会被劣后。
+这样可以在不牺牲自动测速能力的前提下,优先选择某些线路(如自建/低费率节点),仅在它们明显劣于其他节点时才切换。
 
-- Local HTTP/HTTPS/SOCKS server with authentication support
-- VMess, VLESS, Shadowsocks, Trojan, Snell, TUIC, Hysteria protocol support
-- Built-in DNS server that aims to minimize DNS pollution attack impact, supports DoH/DoT upstream and fake IP.
-- Rules based off domains, GEOIP, IPCIDR or Process to forward packets to different nodes
-- Remote groups allow users to implement powerful rules. Supports automatic fallback, load balancing or auto select node
-  based off latency
-- Remote providers, allowing users to get node lists remotely instead of hard-coding in config
-- Netfilter TCP redirecting. Deploy Mihomo on your Internet gateway with `iptables`.
-- Comprehensive HTTP RESTful API controller
+示例:
 
-## Dashboard
+```yaml
+proxy-groups:
+  - name: Auto
+    type: url-test
+    proxies: [HK-01, HK-02, JP-01, US-01]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    policy-priority: "HK*:0.5;JP*:0.8;US*:1.5"
+```
 
-A web dashboard with first-class support for this project has been created; it can be checked out at [metacubexd](https://github.com/MetaCubeX/metacubexd).
+## 2. `select` 组的 `default` 支持通配符
 
-## Configration example
+`select` 类型代理组的 `default` 字段除了原来的精确匹配 / 前缀匹配,现在还支持通配符 (`*` 和 `?`)。
+匹配优先级:精确名称 > 通配符 > 前缀。后台异步探测保持原有非阻塞行为,选择器读取/拨号不会被阻塞。
 
-Configuration example is located at [/docs/config.yaml](https://github.com/MetaCubeX/mihomo/blob/Alpha/docs/config.yaml).
+示例:
 
-## Docs
+```yaml
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies: [DIRECT, HK-Auto, JP-01, JP-02, US-01]
+    default: "JP-*"   # 启动时自动选中第一个匹配 JP- 前缀的节点
+```
 
-Documentation can be found in [mihomo Docs](https://wiki.metacubex.one/).
+## 3. 新增 Tailscale 出站协议 (`type: tailscale`)
 
-## For development
+通过内嵌 `tsnet` 节点直接将流量送入 tailnet,无需在宿主机上安装/运行 Tailscale 客户端。
 
-Requirements:
-[Go 1.20 or newer](https://go.dev/dl/)
+主要能力:
 
-Build mihomo:
+- 配置项支持 `auth-key`、`hostname`、`control-url`、`ephemeral`、`accept-routes`、`exit-node` 等
+- 默认开启子网路由接受;移除 `exit-node` 配置时会自动清理过期 prefs
+- 完整保留 Tailscale 的 DNS 解析(MagicDNS、split-DNS),TCP 与 UDP 目标均生效
+- 将 `net.DefaultResolver` 的"逃生通道"严格限定在 Tailscale 操作内,进程级 DNS 守卫仍能拦住其他越权调用
+- SOCKS、Shadowsocks、Mieru、sing 系列入站允许 UDP 域名回写,避免回包退化为 fake-IP
+
+示例:
+
+```yaml
+proxies:
+  - name: tailnet
+    type: tailscale
+    auth-key: tskey-auth-xxxxxxxx
+    hostname: mihomo-node
+    accept-routes: true
+    # exit-node: 100.x.x.x   # 可选:作为 exit node 出网
+```
+
+> 注意:由于引入 Tailscale 依赖,Go 版本下限相应抬升。
+
+---
+
+## 构建
 
 ```shell
 git clone https://github.com/MetaCubeX/mihomo.git
 cd mihomo && go mod download
-go build
-```
-
-Set go proxy if a connection to GitHub is not possible:
-
-```shell
-go env -w GOPROXY=https://goproxy.io,direct
-```
-
-Build with gvisor tun stack:
-
-```shell
 go build -tags with_gvisor
 ```
 
-### IPTABLES configuration
-
-Work on Linux OS which supported `iptables`
-
-```yaml
-# Enable the TPROXY listener
-tproxy-port: 9898
-
-iptables:
-  enable: true # default is false
-  inbound-interface: eth0 # detect the inbound interface, default is 'lo'
-```
-
-## Debugging
-
-Check [wiki](https://wiki.metacubex.one/api/#debug) to get an instruction on using debug
-API.
-
-## Credits
-
-- [Dreamacro/clash](https://github.com/Dreamacro/clash)
-- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
-- [riobard/go-shadowsocks2](https://github.com/riobard/go-shadowsocks2)
-- [v2ray/v2ray-core](https://github.com/v2ray/v2ray-core)
-- [WireGuard/wireguard-go](https://github.com/WireGuard/wireguard-go)
-- [yaling888/clash-plus-pro](https://github.com/yaling888/clash)
+更多文档参考 [mihomo Wiki](https://wiki.metacubex.one/)。
 
 ## License
 
-This software is released under the GPL-3.0 license.
-
-**In addition, any downstream projects not affiliated with `MetaCubeX` shall not contain the word `mihomo` in their names.**
+GPL-3.0
