@@ -12,12 +12,12 @@
 
 ```yaml
 proxy-groups:
-  - name: Auto
+  - name: 🇭🇰 HK
     type: url-test
-    proxies: [HK-01, HK-02, JP-01, US-01]
+    include-all-providers: true
     url: https://www.gstatic.com/generate_204
     interval: 300
-    policy-priority: "HK*:0.5;JP*:0.8;US*:1.5"
+    policy-priority: "Premium:0.8;Hong Kong:0.85"
 ```
 
 ## 2. `select` 组的 `default` 支持通配符
@@ -29,15 +29,16 @@ proxy-groups:
 
 ```yaml
 proxy-groups:
-  - name: Proxy
+  - name: 🇭🇰 HK
     type: select
-    proxies: [DIRECT, HK-Auto, JP-01, JP-02, US-01]
-    default: "JP-*"   # 启动时自动选中第一个匹配 JP- 前缀的节点
+    include-all-providers: true
+    filter: "🇭🇰|JMS"
+    default: "JMS-*"
 ```
 
 ## 3. 新增 Tailscale 出站协议 (`type: tailscale`)
 
-通过内嵌 `tsnet` 节点直接将流量送入 tailnet,无需在宿主机上安装/运行 Tailscale 客户端。
+通过内嵌 `tsnet` 节点直接将流量送入 tailnet,无需在宿主机上安装/运行 Tailscale 客户端,最大的好处就是在手机端梯子和内网穿透可以共存了。
 
 主要能力:
 
@@ -51,15 +52,19 @@ proxy-groups:
 
 ```yaml
 proxies:
-  - name: tailnet
+  - name: ts-mihomo
     type: tailscale
-    auth-key: tskey-auth-xxxxxxxx
-    hostname: mihomo-node
-    accept-routes: true
-    # exit-node: 100.x.x.x   # 可选:作为 exit node 出网
-```
+    auth-key: tskey-auth-xxxxx
+    hostname: ts-mihomo
+    control-url: https://controlplane.tailscale.com
+    ephemeral: false # 是否是临时节点
+    exit-node: "" # 可选，不需要出口节点就不填
+    accept-routes: true # 可选，默认 true，用于接受 subnet routes
 
-> 注意:由于引入 Tailscale 依赖,Go 版本下限相应抬升。
+rules:
+  # 内网流量打到tailscale中
+  - IP-CIDR,192.168.6.0/24,ts-mihomo,no-resolve
+```
 
 ---
 
