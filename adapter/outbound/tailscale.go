@@ -572,6 +572,10 @@ func (t *Tailscale) ProxyInfo() C.ProxyInfo {
 	return info
 }
 
+func (t *Tailscale) TailscaleControlURL() string {
+	return t.option.ControlURL
+}
+
 func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 	return metadata.Host == "" || metadata.Resolved()
 }
