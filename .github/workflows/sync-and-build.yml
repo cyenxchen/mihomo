@@ -232,8 +232,8 @@ jobs:
       - name: Package
         run: |
           cd bin
-          # gzip linux and darwin
-          for f in mihomo-linux-* mihomo-darwin-*; do
+          # gzip linux / darwin / android（均为无扩展名的裸二进制）
+          for f in mihomo-linux-* mihomo-darwin-* mihomo-android-*; do
             [ -f "$f" ] && gzip -k "$f"
           done
           # zip windows
@@ -241,7 +241,7 @@ jobs:
             [ -f "$f" ] && zip "${f%.exe}.zip" "$f"
           done
           shopt -s nullglob
-          assets=(mihomo-linux-*.gz mihomo-darwin-*.gz mihomo-windows-*.zip)
+          assets=(mihomo-linux-*.gz mihomo-darwin-*.gz mihomo-android-*.gz mihomo-windows-*.zip)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::No release assets generated"
             exit 1
