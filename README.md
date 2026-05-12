@@ -57,13 +57,14 @@ proxies:
     auth-key: tskey-auth-xxxxx
     hostname: ts-mihomo
     control-url: https://controlplane.tailscale.com
-    ephemeral: false # 是否是临时节点
+    ephemeral: true # 是否是临时节点
+    state-dir: "./tailscale"  # 连接上tailscale网络之后会有一些数据持久化,该选项是就指定保存这些数据的目录
     exit-node: "" # 可选，不需要出口节点就不填
     accept-routes: true # 可选，默认 true，用于接受 subnet routes
 
 rules:
-  # 内网流量打到tailscale中
-  - IP-CIDR,192.168.6.0/24,ts-mihomo,no-resolve
+  # 将你家里的内网流量打到tailscale中
+  - IP-CIDR,192.168.1.0/24,ts-mihomo,no-resolve
 ```
 
 ---
