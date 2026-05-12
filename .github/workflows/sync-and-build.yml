@@ -134,6 +134,7 @@ jobs:
           - { goos: linux, goarch: amd64, goamd64: v2, output: amd64-v2 }
           - { goos: windows, goarch: amd64, goamd64: v2, output: amd64-v2 }
           - { goos: darwin, goarch: arm64, output: arm64 }
+          - { goos: android, goarch: arm64, ndk: aarch64-linux-android34, output: arm64-v8a }
     steps:
       - uses: actions/checkout@v5
         with:
@@ -156,13 +157,32 @@ jobs:
           cd $(go env GOROOT)
           patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77930.patch
 
+      - name: Setup NDK
+        if: ${{ matrix.jobs.goos == 'android' }}
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Set NDK path
+        if: ${{ matrix.jobs.goos == 'android' }}
+        run: |
+          echo "CC=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.jobs.ndk }}-clang" >> $GITHUB_ENV
+
       - name: Set variables
         run: |
           # 形如 v1.19.10-custom.3.a1b2c3d，构建号反映本地领先上游的提交数，便于客户端识别新旧 build
           echo "VERSION=${{ needs.check-upstream.outputs.upstream_tag }}-custom.${{ needs.prepare-source.outputs.commits_ahead }}.${{ needs.prepare-source.outputs.short_sha }}" >> $GITHUB_ENV
           echo "BUILDTIME=$(date)" >> $GITHUB_ENV
-          echo "CGO_ENABLED=0" >> $GITHUB_ENV
           echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+          # android 需要 cgo（依赖 NDK），且 NDK 不支持完全静态链接，故不加 -extldflags --static
+          if [ "${{ matrix.jobs.goos }}" = "android" ]; then
+            echo "CGO_ENABLED=1" >> $GITHUB_ENV
+            echo "LDEXTRA=" >> $GITHUB_ENV
+          else
+            echo "CGO_ENABLED=0" >> $GITHUB_ENV
+            echo "LDEXTRA=-extldflags --static" >> $GITHUB_ENV
+          fi
 
       - name: Update CA
         run: |
@@ -177,7 +197,7 @@ jobs:
           GOAMD64: ${{ matrix.jobs.goamd64 }}
         run: |
           go build -v -tags "with_gvisor" -trimpath \
-            -ldflags "-extldflags --static -X 'github.com/metacubex/mihomo/constant.Version=${{ env.VERSION }}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${{ env.BUILDTIME }}' -w -s -buildid="
+            -ldflags "${LDEXTRA} -X 'github.com/metacubex/mihomo/constant.Version=${{ env.VERSION }}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${{ env.BUILDTIME }}' -w -s -buildid="
 
           if [ "${{ matrix.jobs.goos }}" = "windows" ]; then
             mv mihomo.exe mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}.exe
