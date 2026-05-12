@@ -95,7 +95,8 @@ jobs:
       - name: Fix issue77930 for Golang1.26
         run: |
           cd $(go env GOROOT)
-          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77930.patch
+          # 上游 MetaCubeX/go 的 1.26 分支可能已合入该修复，此时 patch 会报 "previously applied"，--forward 会跳过，|| true 避免步骤失败
+          patch --verbose -p 1 --forward < $GITHUB_WORKSPACE/.github/patch/issue77930.patch || echo "issue77930 patch already applied or no longer needed, skipping"
 
       - name: Test custom source
         run: go test ./adapter/outboundgroup ./config ./hub/executor
@@ -155,7 +156,8 @@ jobs:
       - name: Fix issue77930 for Golang1.26
         run: |
           cd $(go env GOROOT)
-          patch --verbose -p 1 < $GITHUB_WORKSPACE/.github/patch/issue77930.patch
+          # 上游 MetaCubeX/go 的 1.26 分支可能已合入该修复，此时 patch 会报 "previously applied"，--forward 会跳过，|| true 避免步骤失败
+          patch --verbose -p 1 --forward < $GITHUB_WORKSPACE/.github/patch/issue77930.patch || echo "issue77930 patch already applied or no longer needed, skipping"
 
       - name: Setup NDK
         if: ${{ matrix.jobs.goos == 'android' }}
