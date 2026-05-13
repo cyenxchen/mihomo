@@ -1,4 +1,4 @@
-# Meta Kernel (个人自用版)
+# Mihomo Kernel (个人自用版)
 
 个人自用版本,相比原版多了以下功能:
 
