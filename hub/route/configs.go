@@ -1,6 +1,8 @@
 package route
 
 import (
+	"encoding/json"
+	"io"
 	"net/netip"
 	"path/filepath"
 
@@ -25,7 +27,9 @@ import (
 func configRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getConfigs)
-	if !embedMode { // disallow update/patch configs in embed mode
+	if embedMode {
+		r.Patch("/", patchEmbedModeConfigs)
+	} else {
 		r.Put("/", updateConfigs)
 		r.Post("/geo", updateGeoDatabases)
 		r.Patch("/", patchConfigs)
@@ -125,9 +129,46 @@ type tuicServerSchema struct {
 	BBRProfile            *string            `yaml:"bbr-profile" json:"bbr-profile,omitempty"`
 }
 
+const maxEmbedModeConfigPatchBytes int64 = 1024
+
+type embedModeConfigPatch struct {
+	Mode *tunnel.TunnelMode `json:"mode"`
+}
+
 func getConfigs(w http.ResponseWriter, r *http.Request) {
 	general := executor.GetGeneral()
 	render.JSON(w, r, general)
+}
+
+func patchEmbedModeConfigs(w http.ResponseWriter, r *http.Request) {
+	patch, err := decodeEmbedModeConfigPatch(http.MaxBytesReader(w, r.Body, maxEmbedModeConfigPatchBytes))
+	if err != nil {
+		log.Warnln("[CMFA] reject embedded config patch: decode failed: %v", err)
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, ErrBadRequest)
+		return
+	}
+
+	if patch.Mode == nil {
+		log.Warnln("[CMFA] reject embedded config patch: only mode changes are allowed")
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, ErrBadRequest)
+		return
+	}
+
+	tunnel.SetMode(*patch.Mode)
+	log.Infoln("[CMFA] embedded config mode changed: %s", patch.Mode.String())
+	render.NoContent(w, r)
+}
+
+func decodeEmbedModeConfigPatch(body io.Reader) (*embedModeConfigPatch, error) {
+	patch := &embedModeConfigPatch{}
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(patch); err != nil {
+		return nil, err
+	}
+	return patch, nil
 }
 
 func pointerOrDefault[T any](p *T, def T) T {

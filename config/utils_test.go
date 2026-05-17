@@ -3,7 +3,9 @@ package config
 import (
 	"testing"
 
+	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateDialerProxies(t *testing.T) {
@@ -74,6 +76,161 @@ func TestValidateDialerProxies(t *testing.T) {
 			} else {
 				assert.ErrorContains(t, err, testCase.errContains, testCase.testName)
 			}
+		})
+	}
+}
+
+func TestParseProxiesPolicyPriority(t *testing.T) {
+	testCases := []struct {
+		testName    string
+		group       []map[string]any
+		errContains string
+	}{
+		{
+			testName: "ValidURLTestPolicyPriority",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0.1;Hong Kong:0.2;",
+				},
+			},
+		},
+		{
+			testName: "InvalidPolicyPriorityType",
+			group: []map[string]any{
+				{
+					"name":            "manual",
+					"type":            "select",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0.1;",
+				},
+			},
+			errContains: "policy-priority only supports url-test",
+		},
+		{
+			testName: "InvalidPolicyPriorityFactor",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "Premium:0;",
+				},
+			},
+			errContains: "must be a finite number greater than 0",
+		},
+		{
+			testName: "InvalidPolicyPriorityRegex",
+			group: []map[string]any{
+				{
+					"name":            "auto",
+					"type":            "url-test",
+					"proxies":         []string{"test-proxy"},
+					"policy-priority": "(:0.1;",
+				},
+			},
+			errContains: "invalid policy-priority regex",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "test-proxy", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+				},
+				ProxyGroup: testCase.group,
+			}
+			_, _, err := parseProxies(&config)
+			if testCase.errContains == "" {
+				assert.NoError(t, err, testCase.testName)
+			} else {
+				assert.ErrorContains(t, err, testCase.errContains, testCase.testName)
+			}
+		})
+	}
+}
+
+func TestParseProxiesSelectDefault(t *testing.T) {
+	testCases := []struct {
+		testName     string
+		defaultValue string
+		want         string
+	}{
+		{testName: "Exact", defaultValue: "proxy-b", want: "proxy-b"},
+		{testName: "Prefix", defaultValue: "proxy", want: "proxy-a"},
+		{testName: "Wildcard", defaultValue: "proxy-*", want: "proxy-a"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+					{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+				},
+				ProxyGroup: []map[string]any{
+					{
+						"name":    "manual",
+						"type":    "select",
+						"default": testCase.defaultValue,
+						"proxies": []string{"proxy-a", "proxy-b"},
+					},
+				},
+			}
+
+			proxies, _, err := parseProxies(&config)
+			require.NoError(t, err)
+
+			selector, ok := proxies["manual"].Adapter().(*outboundgroup.Selector)
+			require.True(t, ok)
+			assert.Equal(t, testCase.want, selector.Now())
+		})
+	}
+}
+
+func TestParseProxiesSelectDefaultValidation(t *testing.T) {
+	testCases := []struct {
+		testName    string
+		group       map[string]any
+		errContains string
+	}{
+		{
+			testName: "DefaultProxyNotFound",
+			group: map[string]any{
+				"name":    "manual",
+				"type":    "select",
+				"default": "proxy-c",
+				"proxies": []string{"proxy-a", "proxy-b"},
+			},
+			errContains: "default proxy, prefix, or wildcard 'proxy-c' not found",
+		},
+		{
+			testName: "DefaultOnlySupportsSelect",
+			group: map[string]any{
+				"name":    "auto",
+				"type":    "url-test",
+				"default": "proxy-a",
+				"proxies": []string{"proxy-a", "proxy-b"},
+			},
+			errContains: "default only supports select",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			config := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "proxy-a", "type": "socks5", "server": "127.0.0.1", "port": 1080},
+					{"name": "proxy-b", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+				},
+				ProxyGroup: []map[string]any{testCase.group},
+			}
+
+			_, _, err := parseProxies(&config)
+			assert.ErrorContains(t, err, testCase.errContains)
 		})
 	}
 }
