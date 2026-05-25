@@ -1,4 +1,4 @@
-//go:build !(windows || linux || darwin)
+//go:build android || !(windows || linux || darwin)
 
 package ntp
 
