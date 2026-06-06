@@ -32,7 +32,7 @@ func newTestSelector(t *testing.T, option *GroupCommonOption, proxies ...C.Proxy
 	pd, err := provider.NewCompatibleProvider(option.Name+"-provider", proxies, hc)
 	require.NoError(t, err)
 
-	return NewSelector(option, []P.ProxyProvider{pd})
+	return NewSelector(option, newStubProxy("COMPATIBLE", option.URL, 0, true), []P.ProxyProvider{pd})
 }
 
 type directDialProxy struct {

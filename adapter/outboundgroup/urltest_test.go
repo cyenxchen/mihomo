@@ -119,7 +119,7 @@ func newTestURLTest(t *testing.T, option *GroupCommonOption, proxies ...C.Proxy)
 	opts, err := parseURLTestOption(option)
 	require.NoError(t, err)
 
-	return NewURLTest(option, []P.ProxyProvider{pd}, opts...)
+	return NewURLTest(option, newStubProxy("COMPATIBLE", option.URL, 0, true), []P.ProxyProvider{pd}, opts...)
 }
 
 func TestParseURLTestOptionPolicyPriority(t *testing.T) {
@@ -133,7 +133,7 @@ func TestParseURLTestOptionPolicyPriority(t *testing.T) {
 	opts, err := parseURLTestOption(option)
 	require.NoError(t, err)
 
-	group := NewURLTest(option, nil, opts...)
+	group := NewURLTest(option, newStubProxy("COMPATIBLE", option.URL, 0, true), nil, opts...)
 	require.Len(t, group.policyPriority, 2)
 	assert.Equal(t, uint16(150), group.tolerance)
 	assert.Equal(t, "Premium", group.policyPriority[0].pattern)
