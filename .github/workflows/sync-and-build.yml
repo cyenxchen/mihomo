@@ -1,0 +1,322 @@
+name: Sync Upstream and Build
+
+on:
+  push:
+    branches:
+      - Meta
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建（忽略版本检查）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-and-build
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+    steps:
+      - name: Check upstream release
+        id: check
+        run: |
+          UPSTREAM_TAG=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
+          echo "Upstream latest: ${UPSTREAM_TAG}"
+
+          FORK_TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
+          echo "Fork latest: ${FORK_TAG}"
+
+          FORK_TARGET=$(gh api "repos/${{ github.repository }}/releases/tags/${UPSTREAM_TAG}" --jq '.target_commitish' 2>/dev/null || echo "none")
+          echo "Fork release target for ${UPSTREAM_TAG}: ${FORK_TARGET}"
+
+          echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
+
+          PUSH_BUILD=false
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${FORK_TARGET}" != "${{ github.sha }}" ]; then
+              PUSH_BUILD=true
+              echo "Meta changed since current custom release, will rebuild."
+            else
+              echo "Meta already matches current custom release target, skip push rebuild."
+            fi
+          fi
+
+          FORCE_BUILD="${{ github.event_name == 'workflow_dispatch' && inputs.force }}"
+          if [ "$UPSTREAM_TAG" != "$FORK_TAG" ] || [ "$FORCE_BUILD" == "true" ] || [ "$PUSH_BUILD" == "true" ]; then
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "Build required."
+          else
+            echo "new_version=false" >> $GITHUB_OUTPUT
+            echo "Already up to date, skip."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  prepare-source:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      custom_sha: ${{ steps.publish.outputs.custom_sha }}
+      temp_branch: ${{ steps.publish.outputs.temp_branch }}
+      commits_ahead: ${{ steps.publish.outputs.commits_ahead }}
+      short_sha: ${{ steps.publish.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Prepare custom source
+        id: prepare
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+        run: |
+          .github/scripts/prepare-custom-source.sh "${UPSTREAM_TAG}" custom-source
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+          go-version: '1.26'
+
+      - name: Fix issue77930 for Golang1.26
+        run: |
+          cd $(go env GOROOT)
+          # 上游 MetaCubeX/go 的 1.26 分支可能已合入该修复，此时 patch 会报 "previously applied"，--forward 会跳过，|| true 避免步骤失败
+          patch --verbose -p 1 --forward < $GITHUB_WORKSPACE/.github/patch/issue77930.patch || echo "issue77930 patch already applied or no longer needed, skipping"
+
+      - name: Test custom source
+        run: go test ./adapter/outboundgroup ./config ./hub/executor
+
+      - name: Publish prepared source
+        id: publish
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+        run: |
+          TEMP_BRANCH="ci/sync-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CUSTOM_SHA="${{ steps.prepare.outputs.custom_sha }}"
+
+          if [ "$(git rev-parse HEAD)" != "$CUSTOM_SHA" ]; then
+            echo "::error::Prepared source SHA changed before publish"
+            exit 1
+          fi
+
+          # 本地 patch 数（rebase 之后等于本地领先上游 tag 的提交数）
+          COMMITS_AHEAD="$(git rev-list --count "${UPSTREAM_TAG}..HEAD")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          echo "Commits ahead of ${UPSTREAM_TAG}: ${COMMITS_AHEAD}, short sha: ${SHORT_SHA}"
+
+          git push origin "HEAD:refs/heads/${TEMP_BRANCH}" --force
+          echo "custom_sha=${CUSTOM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "temp_branch=${TEMP_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "commits_ahead=${COMMITS_AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [check-upstream, prepare-source]
+    if: needs.check-upstream.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        jobs:
+          - { goos: linux, goarch: amd64, goamd64: v2, output: amd64-v2 }
+          - { goos: windows, goarch: amd64, goamd64: v2, output: amd64-v2 }
+          - { goos: darwin, goarch: arm64, output: arm64 }
+          - { goos: android, goarch: arm64, ndk: aarch64-linux-android34, output: arm64-v8a }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
+          fetch-depth: 1
+
+      - name: Verify prepared source
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ needs.prepare-source.outputs.custom_sha }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+          go-version: '1.26'
+
+        # TODO: remove after issue77930 fixed, see: https://github.com/golang/go/issues/77930
+      - name: Fix issue77930 for Golang1.26
+        run: |
+          cd $(go env GOROOT)
+          # 上游 MetaCubeX/go 的 1.26 分支可能已合入该修复，此时 patch 会报 "previously applied"，--forward 会跳过，|| true 避免步骤失败
+          patch --verbose -p 1 --forward < $GITHUB_WORKSPACE/.github/patch/issue77930.patch || echo "issue77930 patch already applied or no longer needed, skipping"
+
+      - name: Setup NDK
+        if: ${{ matrix.jobs.goos == 'android' }}
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Set NDK path
+        if: ${{ matrix.jobs.goos == 'android' }}
+        run: |
+          echo "CC=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.jobs.ndk }}-clang" >> $GITHUB_ENV
+
+      - name: Set variables
+        run: |
+          # 形如 v1.19.10-custom.3.a1b2c3d，构建号反映本地领先上游的提交数，便于客户端识别新旧 build
+          echo "VERSION=${{ needs.check-upstream.outputs.upstream_tag }}-custom.${{ needs.prepare-source.outputs.commits_ahead }}.${{ needs.prepare-source.outputs.short_sha }}" >> $GITHUB_ENV
+          echo "BUILDTIME=$(date)" >> $GITHUB_ENV
+          echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+          # android 需要 cgo（依赖 NDK），且 NDK 不支持完全静态链接，故不加 -extldflags --static
+          if [ "${{ matrix.jobs.goos }}" = "android" ]; then
+            echo "CGO_ENABLED=1" >> $GITHUB_ENV
+            echo "LDEXTRA=" >> $GITHUB_ENV
+          else
+            echo "CGO_ENABLED=0" >> $GITHUB_ENV
+            echo "LDEXTRA=-extldflags --static" >> $GITHUB_ENV
+          fi
+
+      - name: Update CA
+        run: |
+          sudo apt-get update && sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.jobs.goos }}
+          GOARCH: ${{ matrix.jobs.goarch }}
+          GOAMD64: ${{ matrix.jobs.goamd64 }}
+        run: |
+          go build -v -tags "with_gvisor" -trimpath \
+            -ldflags "${LDEXTRA} -X 'github.com/metacubex/mihomo/constant.Version=${{ env.VERSION }}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${{ env.BUILDTIME }}' -w -s -buildid="
+
+          if [ "${{ matrix.jobs.goos }}" = "windows" ]; then
+            mv mihomo.exe mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}.exe
+          else
+            mv mihomo mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}
+          path: mihomo-*
+
+  release:
+    needs: [check-upstream, prepare-source, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: bin/
+          merge-multiple: true
+
+      - name: Package
+        run: |
+          cd bin
+          # gzip linux / darwin / android（均为无扩展名的裸二进制）
+          for f in mihomo-linux-* mihomo-darwin-* mihomo-android-*; do
+            [ -f "$f" ] && gzip -k "$f"
+          done
+          # zip windows
+          for f in mihomo-windows-*.exe; do
+            [ -f "$f" ] && zip "${f%.exe}.zip" "$f"
+          done
+          shopt -s nullglob
+          assets=(mihomo-linux-*.gz mihomo-darwin-*.gz mihomo-android-*.gz mihomo-windows-*.zip)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No release assets generated"
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > checksums.txt
+          cat checksums.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+          CUSTOM_SHA: ${{ needs.prepare-source.outputs.custom_sha }}
+          COMMITS_AHEAD: ${{ needs.prepare-source.outputs.commits_ahead }}
+          SHORT_SHA: ${{ needs.prepare-source.outputs.short_sha }}
+        run: |
+          BUILD_TAG="custom.${COMMITS_AHEAD}.${SHORT_SHA}"
+          RELEASE_TITLE="mihomo ${UPSTREAM_TAG} (${BUILD_TAG})"
+          RELEASE_NOTES="基于上游 MetaCubeX/mihomo ${UPSTREAM_TAG} + policy-priority for url-test + default selection for select groups (build ${BUILD_TAG})"
+
+          git tag -f "${UPSTREAM_TAG}" "${CUSTOM_SHA}"
+          git push --force origin "refs/tags/${UPSTREAM_TAG}"
+
+          if gh release view "${UPSTREAM_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "${UPSTREAM_TAG}" \
+              --repo "${{ github.repository }}" \
+              --title "${RELEASE_TITLE}" \
+              --notes "${RELEASE_NOTES}" \
+              --target "${CUSTOM_SHA}"
+          else
+            gh release create "${UPSTREAM_TAG}" \
+              --repo "${{ github.repository }}" \
+              --verify-tag \
+              --title "${RELEASE_TITLE}" \
+              --notes "${RELEASE_NOTES}"
+          fi
+
+          gh release upload "${UPSTREAM_TAG}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            bin/*.gz bin/*.zip bin/checksums.txt
+
+  update-branch:
+    needs: [check-upstream, prepare-source, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-source.outputs.temp_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Update Meta branch
+        run: |
+          CUSTOM_SHA="${{ needs.prepare-source.outputs.custom_sha }}"
+          if [ "$(git rev-parse HEAD)" != "$CUSTOM_SHA" ]; then
+            echo "::error::Prepared source SHA changed before branch update"
+            exit 1
+          fi
+
+          git fetch origin Meta:refs/remotes/origin/Meta --force
+          EXPECTED_META="$(git rev-parse origin/Meta)"
+          git push --force-with-lease=refs/heads/Meta:"${EXPECTED_META}" origin "HEAD:refs/heads/Meta"
+
+  cleanup-source:
+    needs: [prepare-source, build, release, update-branch]
+    if: ${{ always() && needs.prepare-source.result == 'success' && needs.prepare-source.outputs.temp_branch != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete prepared source branch
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          TEMP_BRANCH: ${{ needs.prepare-source.outputs.temp_branch }}
+        run: |
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${TEMP_BRANCH}" || true
