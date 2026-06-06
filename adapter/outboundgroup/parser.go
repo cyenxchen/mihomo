@@ -70,6 +70,14 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	groupName := groupOption.Name
+	// fork: policy-priority / default 分别属于 URLTestOption / SelectorOption，
+	// 这里直接查 config 以便在写错 group 类型时明确报错，而不是被 decoder 静默忽略
+	if v, ok := config["policy-priority"]; ok && v != "" && groupOption.Type != "url-test" {
+		return nil, fmt.Errorf("%s: policy-priority only supports url-test", groupName)
+	}
+	if v, ok := config["default"]; ok && v != "" && groupOption.Type != "select" {
+		return nil, fmt.Errorf("%s: default only supports select", groupName)
+	}
 
 	if groupOption.EmptyFallback == "" {
 		groupOption.EmptyFallback = "COMPATIBLE"
@@ -191,14 +199,31 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if err != nil {
 			return nil, err
 		}
-		return NewURLTest(groupOption, opt, emptyFallback, providers)
+		urlTest, err := NewURLTest(groupOption, opt, emptyFallback, providers)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", groupName, err)
+		}
+		return urlTest, nil
 	case "select":
 		opt := SelectorOption{}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
 		}
-		return NewSelector(groupOption, opt, emptyFallback, providers)
+		// fork: default 的可用性探测需要复用 group 的 expected-status
+		opt.expectedStatus = expectedStatus
+		selector, err := NewSelector(groupOption, opt, emptyFallback, providers)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", groupName, err)
+		}
+		// fork: default 支持前缀/通配符，配置了却一个都匹配不上时提前报错
+		if opt.Default != "" && !selector.hasDefaultMatch(opt.Default) {
+			if len(groupOption.Use) == 0 {
+				return nil, fmt.Errorf("%s: default proxy, prefix, or wildcard '%s' not found", groupName, opt.Default)
+			}
+			log.Warnln("The select group [%s] default proxy, prefix, or wildcard [%s] is not currently available, fallback to the first proxy", groupName, opt.Default)
+		}
+		return selector, nil
 	case "fallback":
 		opt := FallbackOption{}
 		err = decoder.Decode(config, &opt)
