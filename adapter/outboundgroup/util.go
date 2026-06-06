@@ -32,6 +32,11 @@ type SelectAble interface {
 	ForceSet(name string)
 }
 
+type DefaultSelectAble interface {
+	StartDefaultSelection()
+}
+
 var _ SelectAble = (*Fallback)(nil)
 var _ SelectAble = (*URLTest)(nil)
 var _ SelectAble = (*Selector)(nil)
+var _ DefaultSelectAble = (*Selector)(nil)
