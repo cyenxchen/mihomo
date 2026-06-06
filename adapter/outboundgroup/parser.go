@@ -23,26 +23,30 @@ var (
 )
 
 type GroupCommonOption struct {
-	Name                string   `group:"name"`
-	Type                string   `group:"type"`
-	Proxies             []string `group:"proxies,omitempty"`
-	Use                 []string `group:"use,omitempty"`
-	URL                 string   `group:"url,omitempty"`
-	Interval            int      `group:"interval,omitempty"`
-	TestTimeout         int      `group:"timeout,omitempty"`
-	MaxFailedTimes      int      `group:"max-failed-times,omitempty"`
-	EmptyFallback       string   `group:"empty-fallback,omitempty"`
-	Lazy                bool     `group:"lazy,omitempty"`
-	DisableUDP          bool     `group:"disable-udp,omitempty"`
-	Filter              string   `group:"filter,omitempty"`
-	ExcludeFilter       string   `group:"exclude-filter,omitempty"`
-	ExcludeType         string   `group:"exclude-type,omitempty"`
-	ExpectedStatus      string   `group:"expected-status,omitempty"`
-	IncludeAll          bool     `group:"include-all,omitempty"`
-	IncludeAllProxies   bool     `group:"include-all-proxies,omitempty"`
-	IncludeAllProviders bool     `group:"include-all-providers,omitempty"`
-	Hidden              bool     `group:"hidden,omitempty"`
-	Icon                string   `group:"icon,omitempty"`
+	Name                string                  `group:"name"`
+	Type                string                  `group:"type"`
+	Proxies             []string                `group:"proxies,omitempty"`
+	Use                 []string                `group:"use,omitempty"`
+	URL                 string                  `group:"url,omitempty"`
+	Interval            int                     `group:"interval,omitempty"`
+	Tolerance           int                     `group:"tolerance,omitempty"`
+	TestTimeout         int                     `group:"timeout,omitempty"`
+	MaxFailedTimes      int                     `group:"max-failed-times,omitempty"`
+	EmptyFallback       string                  `group:"empty-fallback,omitempty"`
+	Lazy                bool                    `group:"lazy,omitempty"`
+	DisableUDP          bool                    `group:"disable-udp,omitempty"`
+	Filter              string                  `group:"filter,omitempty"`
+	ExcludeFilter       string                  `group:"exclude-filter,omitempty"`
+	ExcludeType         string                  `group:"exclude-type,omitempty"`
+	ExpectedStatus      string                  `group:"expected-status,omitempty"`
+	PolicyPriority      string                  `group:"policy-priority,omitempty"`
+	Default             string                  `group:"default,omitempty"`
+	IncludeAll          bool                    `group:"include-all,omitempty"`
+	IncludeAllProxies   bool                    `group:"include-all-proxies,omitempty"`
+	IncludeAllProviders bool                    `group:"include-all-providers,omitempty"`
+	Hidden              bool                    `group:"hidden,omitempty"`
+	Icon                string                  `group:"icon,omitempty"`
+	expectedStatus      utils.IntRanges[uint16] `group:"-"`
 }
 
 func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string) (C.ProxyAdapter, error) {
@@ -70,6 +74,12 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	groupName := groupOption.Name
+	if groupOption.PolicyPriority != "" && groupOption.Type != "url-test" {
+		return nil, fmt.Errorf("%s: policy-priority only supports url-test", groupName)
+	}
+	if groupOption.Default != "" && groupOption.Type != "select" {
+		return nil, fmt.Errorf("%s: default only supports select", groupName)
+	}
 
 	if groupOption.EmptyFallback == "" {
 		groupOption.EmptyFallback = "COMPATIBLE"
@@ -125,6 +135,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		status = "*"
 	}
 	groupOption.ExpectedStatus = status
+	groupOption.expectedStatus = expectedStatus
 
 	if len(groupOption.Use) != 0 {
 		PDs, err := getProviders(providersMap, groupOption.Use)
@@ -184,10 +195,20 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	var group C.ProxyAdapter
 	switch groupOption.Type {
 	case "url-test":
-		opts := parseURLTestOption(config)
+		opts, err := parseURLTestOption(groupOption)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", groupName, err)
+		}
 		group = NewURLTest(groupOption, emptyFallback, providers, opts...)
 	case "select":
-		group = NewSelector(groupOption, emptyFallback, providers)
+		selector := NewSelector(groupOption, emptyFallback, providers)
+		if groupOption.Default != "" && !selector.hasDefaultMatch(groupOption.Default) {
+			if len(groupOption.Use) == 0 {
+				return nil, fmt.Errorf("%s: default proxy, prefix, or wildcard '%s' not found", groupName, groupOption.Default)
+			}
+			log.Warnln("The select group [%s] default proxy, prefix, or wildcard [%s] is not currently available, fallback to the first proxy", groupName, groupOption.Default)
+		}
+		group = selector
 	case "fallback":
 		group = NewFallback(groupOption, emptyFallback, providers)
 	case "load-balance":

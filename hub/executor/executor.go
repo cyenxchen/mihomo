@@ -42,7 +42,26 @@ import (
 	"github.com/metacubex/mihomo/tunnel"
 )
 
-var mux sync.Mutex
+var (
+	mux               sync.Mutex
+	applyConfigHookMu sync.RWMutex
+	applyConfigHook   func(*config.Config)
+)
+
+func SetApplyConfigHook(hook func(*config.Config)) {
+	applyConfigHookMu.Lock()
+	defer applyConfigHookMu.Unlock()
+	applyConfigHook = hook
+}
+
+func notifyApplyConfigHook(cfg *config.Config) {
+	applyConfigHookMu.RLock()
+	hook := applyConfigHook
+	applyConfigHookMu.RUnlock()
+	if hook != nil {
+		hook(cfg)
+	}
+}
 
 func readConfig(path string) ([]byte, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -82,6 +101,11 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 
 // ApplyConfig dispatch configure to all parts without ExternalController
 func ApplyConfig(cfg *config.Config, force bool) {
+	applyConfig(cfg, force)
+	notifyApplyConfigHook(cfg)
+}
+
+func applyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
 	log.SetLevel(cfg.General.LogLevel)
@@ -440,6 +464,7 @@ func updateProfile(cfg *config.Config) {
 	if profileCfg.StoreSelected {
 		patchSelectGroup(cfg.Proxies)
 	}
+	startSelectGroupDefault(cfg.Proxies)
 }
 
 func patchSelectGroup(proxies map[string]C.Proxy) {
@@ -460,6 +485,17 @@ func patchSelectGroup(proxies map[string]C.Proxy) {
 		}
 
 		selector.ForceSet(selected)
+	}
+}
+
+func startSelectGroupDefault(proxies map[string]C.Proxy) {
+	for _, outbound := range proxies {
+		selector, ok := outbound.Adapter().(outboundgroup.DefaultSelectAble)
+		if !ok {
+			continue
+		}
+
+		selector.StartDefaultSelection()
 	}
 }
 
