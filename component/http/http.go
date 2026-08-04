@@ -78,6 +78,11 @@ func HttpRequest(ctx context.Context, url, method string, header map[string][]st
 			if opt.dialer != nil {
 				return opt.dialer.DialContext(ctx, network, address)
 			}
+			// A configured proxy is an explicit routing requirement. Fail closed
+			// instead of leaking this request through the direct fallback.
+			if opt.specialProxy != "" {
+				return inner.HandleTcp(inner.GetTunnel(), address, opt.specialProxy)
+			}
 			if conn, err := inner.HandleTcp(inner.GetTunnel(), address, opt.specialProxy); err == nil {
 				return conn, nil
 			}

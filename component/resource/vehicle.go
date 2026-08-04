@@ -3,7 +3,9 @@ package resource
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,6 +14,7 @@ import (
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/http"
 )
@@ -123,6 +126,8 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 	header := h.header
+	urlSummary := safeURLSummary(h.url)
+	log.Infoln("[Provider] HTTP fetch start url=%s proxy=%q", urlSummary, h.proxy)
 	setIfNoneMatch := false
 	if etag && oldHash.IsValid() {
 		etagWithHash := cachefile.Cache().GetETagWithHash(h.url)
@@ -138,9 +143,11 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 	}
 	resp, err := mihomoHttp.HttpRequest(ctx, h.url, http.MethodGet, header, nil, mihomoHttp.WithSpecialProxy(h.proxy))
 	if err != nil {
+		log.Warnln("[Provider] HTTP fetch failed url=%s proxy=%q error=%v", urlSummary, h.proxy, err)
 		return
 	}
 	defer resp.Body.Close()
+	log.Infoln("[Provider] HTTP fetch status url=%s proxy=%q status=%d", urlSummary, h.proxy, resp.StatusCode)
 
 	if h.inRead != nil {
 		h.inRead(resp)
@@ -150,6 +157,7 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 		if setIfNoneMatch && resp.StatusCode == http.StatusNotModified {
 			return nil, oldHash, nil
 		}
+		log.Errorln("[Provider] HTTP fetch non-2xx url=%s proxy=%q status=%d", urlSummary, h.proxy, resp.StatusCode)
 		err = errors.New(resp.Status)
 		return
 	}
@@ -170,6 +178,16 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 		})
 	}
 	return
+}
+
+// safeURLSummary keeps routing diagnostics useful without logging credentials,
+// path contents, or query values from subscription URLs.
+func safeURLSummary(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "invalid-url"
+	}
+	return fmt.Sprintf("%s://%s path_len=%d query=%t", parsed.Scheme, parsed.Host, len(parsed.EscapedPath()), parsed.RawQuery != "")
 }
 
 func NewHTTPVehicle(url string, path string, proxy string, header http.Header, timeout time.Duration, sizeLimit int64) *HTTPVehicle {
