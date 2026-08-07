@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +47,17 @@ type Tailscale struct {
 
 	serverStarted bool
 
+	networkChangeMu       sync.RWMutex
+	networkChangeNotifier func()
+
 	unregisterDNSResolver func()
+}
+
+var tailscaleInstances = struct {
+	sync.RWMutex
+	items map[*Tailscale]struct{}
+}{
+	items: map[*Tailscale]struct{}{},
 }
 
 type TailscaleOption struct {
@@ -177,6 +188,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
 	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+	registerTailscaleInstance(outbound)
 	return outbound, nil
 }
 
@@ -188,6 +200,16 @@ func (t *Tailscale) start() error {
 			return
 		}
 		t.serverStarted = true
+		// tsnet owns one netmon per outbound. Keep only its non-blocking event
+		// injection callback so mobile frontends can wake every live instance
+		// after the operating system changes the underlying network.
+		if sys := t.server.Sys(); sys != nil {
+			if monitor, ok := sys.NetMon.GetOK(); ok {
+				t.setNetworkChangeNotifier(monitor.InjectEvent)
+			} else {
+				log.Warnln("[Tailscale](%s) network monitor is unavailable after startup", t.Name())
+			}
+		}
 		ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
 		defer cancel()
 		if err := t.applyPrefs(ctx); err != nil {
@@ -461,7 +483,76 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 	return true
 }
 
+// NotifyTailscaleNetworkChange updates Tailscale's mobile default-route hint
+// and wakes every started tsnet monitor. The callback is intentionally small:
+// netmon performs the actual state comparison and decides whether sockets need
+// rebinding, matching the native Tailscale mobile client lifecycle.
+func NotifyTailscaleNetworkChange(defaultInterface string) (registered, notified int) {
+	defaultInterface = strings.TrimSpace(defaultInterface)
+	if len(defaultInterface) > 64 {
+		defaultInterface = defaultInterface[:64]
+	}
+	updateTailscaleDefaultRouteInterface(defaultInterface)
+
+	tailscaleInstances.RLock()
+	instances := make([]*Tailscale, 0, len(tailscaleInstances.items))
+	for instance := range tailscaleInstances.items {
+		instances = append(instances, instance)
+	}
+	tailscaleInstances.RUnlock()
+
+	for _, instance := range instances {
+		if instance.notifyNetworkChange() {
+			notified++
+		}
+	}
+	registered = len(instances)
+	log.Infoln(
+		"[Tailscale] network change defaultInterface=%q instances=%d notified=%d",
+		defaultInterface,
+		registered,
+		notified,
+	)
+	return registered, notified
+}
+
+func registerTailscaleInstance(instance *Tailscale) {
+	if instance == nil {
+		return
+	}
+	tailscaleInstances.Lock()
+	tailscaleInstances.items[instance] = struct{}{}
+	tailscaleInstances.Unlock()
+}
+
+func unregisterTailscaleInstance(instance *Tailscale) {
+	if instance == nil {
+		return
+	}
+	tailscaleInstances.Lock()
+	delete(tailscaleInstances.items, instance)
+	tailscaleInstances.Unlock()
+}
+
+func (t *Tailscale) setNetworkChangeNotifier(notifier func()) {
+	t.networkChangeMu.Lock()
+	t.networkChangeNotifier = notifier
+	t.networkChangeMu.Unlock()
+}
+
+func (t *Tailscale) notifyNetworkChange() bool {
+	t.networkChangeMu.RLock()
+	defer t.networkChangeMu.RUnlock()
+	if t.networkChangeNotifier == nil {
+		return false
+	}
+	t.networkChangeNotifier()
+	return true
+}
+
 func (t *Tailscale) Close() error {
+	unregisterTailscaleInstance(t)
+	t.setNetworkChangeNotifier(nil)
 	t.cancel()
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()

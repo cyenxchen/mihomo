@@ -26,3 +26,9 @@ type TailscaleOption struct {
 func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	return nil, fmt.Errorf("tailscale support is disabled by \"no_tailscale\" build tag or not include \"with_gvisor\" build tag")
 }
+
+// NotifyTailscaleNetworkChange is a no-op when Tailscale support is excluded
+// from the build, keeping mobile bridge code independent of build tags.
+func NotifyTailscaleNetworkChange(string) (registered, notified int) {
+	return 0, 0
+}
