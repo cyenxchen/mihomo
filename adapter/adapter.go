@@ -38,6 +38,21 @@ type Proxy struct {
 	extra   xsync.Map[string, *internalProxyState]
 }
 
+// runtimeHealthReporter lets stateful adapters invalidate a stale successful
+// delay result without expanding the public ProxyAdapter interface.
+type runtimeHealthReporter interface {
+	RuntimeAlive() bool
+}
+
+func (p *Proxy) runtimeAlive() bool {
+	reporter, ok := p.ProxyAdapter.(runtimeHealthReporter)
+	return !ok || reporter.RuntimeAlive()
+}
+
+func (p *Proxy) effectiveAlive() bool {
+	return p.alive.Load() && p.runtimeAlive()
+}
+
 // Adapter implements C.Proxy
 func (p *Proxy) Adapter() C.ProxyAdapter {
 	return p.ProxyAdapter
@@ -45,11 +60,14 @@ func (p *Proxy) Adapter() C.ProxyAdapter {
 
 // AliveForTestUrl implements C.Proxy
 func (p *Proxy) AliveForTestUrl(url string) bool {
+	if !p.runtimeAlive() {
+		return false
+	}
 	if state, ok := p.extra.Load(url); ok {
 		return state.alive.Load()
 	}
 
-	return p.alive.Load()
+	return p.effectiveAlive()
 }
 
 // DialContext implements C.ProxyAdapter
@@ -92,6 +110,7 @@ func (p *Proxy) DelayHistoryForTestUrl(url string) []C.DelayHistory {
 // implements C.Proxy
 func (p *Proxy) ExtraDelayHistories() map[string]C.ProxyState {
 	histories := map[string]C.ProxyState{}
+	runtimeAlive := p.runtimeAlive()
 
 	p.extra.Range(func(k string, v *internalProxyState) bool {
 		testUrl := k
@@ -105,7 +124,7 @@ func (p *Proxy) ExtraDelayHistories() map[string]C.ProxyState {
 		}
 
 		histories[testUrl] = C.ProxyState{
-			Alive:   state.alive.Load(),
+			Alive:   state.alive.Load() && runtimeAlive,
 			History: history,
 		}
 		return true
@@ -117,6 +136,9 @@ func (p *Proxy) ExtraDelayHistories() map[string]C.ProxyState {
 // implements C.Proxy
 func (p *Proxy) LastDelayForTestUrl(url string) (delay uint16) {
 	var maxDelay uint16 = 0xffff
+	if !p.runtimeAlive() {
+		return maxDelay
+	}
 
 	alive := false
 	var history C.DelayHistory
@@ -143,7 +165,7 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 	_ = json.Unmarshal(inner, &mapping)
 	mapping["history"] = p.DelayHistory()
 	mapping["extra"] = p.ExtraDelayHistories()
-	mapping["alive"] = p.alive.Load()
+	mapping["alive"] = p.effectiveAlive()
 	mapping["name"] = p.Name()
 	mapping["udp"] = p.SupportUDP()
 	mapping["uot"] = p.SupportUOT()

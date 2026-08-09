@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface/anet"
@@ -47,6 +48,7 @@ type Tailscale struct {
 	backendInitErr  error
 
 	serverStarted bool
+	runtimeAlive  atomic.Bool
 
 	networkChangeMu       sync.RWMutex
 	networkChangeNotifier func()
@@ -153,6 +155,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		ctx:           ctx,
 		cancel:        cancel,
 		backendInitCh: make(chan struct{}),
+		runtimeAlive:  atomic.NewBool(true),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	outbound.server = &tsnet.Server{
@@ -181,10 +184,14 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			return ips, err
 		},
 		UserLogf: func(format string, args ...any) {
-			log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			message := fmt.Sprintf(format, args...)
+			outbound.observeRuntimeLog(message)
+			log.Infoln("[Tailscale](%s) %s", option.Name, message)
 		},
 		Logf: func(format string, args ...any) {
-			log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+			message := fmt.Sprintf(format, args...)
+			outbound.observeRuntimeLog(message)
+			log.Debugln("[Tailscale](%s) %s", option.Name, message)
 		},
 	}
 	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
@@ -192,6 +199,30 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
 	registerTailscaleInstance(outbound)
 	return outbound, nil
+}
+
+// RuntimeAlive reports fatal control-plane state to adapter.Proxy. A missing
+// Headscale node cannot recover while tsnet keeps reusing the deleted identity.
+func (t *Tailscale) RuntimeAlive() bool {
+	return t.runtimeAlive.Load()
+}
+
+func (t *Tailscale) observeRuntimeLog(message string) {
+	lowerMessage := strings.ToLower(message)
+	if !strings.Contains(lowerMessage, "pollnetmap") ||
+		!strings.Contains(lowerMessage, "404") ||
+		!strings.Contains(lowerMessage, "node not found") {
+		return
+	}
+
+	// Emit one durable warning per instance; the underlying control client may
+	// retry and log the same 404 indefinitely while backing off.
+	if t.runtimeAlive.CompareAndSwap(true, false) {
+		log.Warnln(
+			"[Tailscale](%s) control node missing: received PollNetMap 404 node not found; proxy marked unavailable and re-registration is required",
+			t.Name(),
+		)
+	}
 }
 
 func (t *Tailscale) start() error {
