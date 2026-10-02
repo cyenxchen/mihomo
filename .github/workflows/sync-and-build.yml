@@ -283,6 +283,11 @@ jobs:
             --clobber \
             bin/*.gz bin/*.zip bin/checksums.txt
 
+      - name: Keep the latest 5 stable releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/prune-releases.sh
+
   update-branch:
     needs: [check-upstream, prepare-source, release]
     runs-on: ubuntu-latest
