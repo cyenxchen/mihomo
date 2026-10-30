@@ -88,6 +88,10 @@ func (p *Pool) IPNet() netip.Prefix {
 
 // CloneFrom clone cache from old pool
 func (p *Pool) CloneFrom(o *Pool) {
+	if p == o {
+		return
+	}
+
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
