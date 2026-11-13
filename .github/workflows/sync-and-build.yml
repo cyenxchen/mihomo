@@ -99,7 +99,7 @@ jobs:
           patch --verbose -p 1 --forward < $GITHUB_WORKSPACE/.github/patch/issue77930.patch || echo "issue77930 patch already applied or no longer needed, skipping"
 
       - name: Test custom source
-        run: go test ./adapter/outboundgroup ./config ./hub/executor
+        run: CGO_ENABLED=0 go test ./adapter/outboundgroup ./config ./hub/executor ./component/netenv ./hub/route ./dns ./tunnel -count=1
 
       - name: Publish prepared source
         id: publish

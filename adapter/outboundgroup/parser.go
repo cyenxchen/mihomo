@@ -59,6 +59,10 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 
+	if groupOption.Type == "subnet" {
+		return forkParseSubnet(config, groupOption, proxyMap)
+	}
+
 	if _, ok := config["routing-mark"]; ok {
 		log.Errorln("The group [%s] with routing-mark configuration was removed, please set it directly on the proxy instead", groupOption.Name)
 	}

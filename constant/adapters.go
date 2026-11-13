@@ -250,6 +250,8 @@ func (at AdapterType) String() string {
 		return "Fallback"
 	case URLTest:
 		return "URLTest"
+	case Subnet:
+		return "Subnet"
 	case LoadBalance:
 		return "LoadBalance"
 	default:

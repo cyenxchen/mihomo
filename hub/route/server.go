@@ -120,6 +120,7 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 		if secret != "" {
 			r.Use(authentication(secret))
 		}
+		r.Use(forkNetworkAuthentication(secret))
 		r.Get("/", hello)
 		r.Get("/logs", getLogs)
 		r.Get("/traffic", traffic)

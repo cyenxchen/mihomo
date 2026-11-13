@@ -37,6 +37,7 @@ type result struct {
 }
 
 type Resolver struct {
+	forkEpoch             forkCacheEpoch
 	ipv6                  bool
 	ipv6Timeout           time.Duration
 	main                  []dnsClient
@@ -185,6 +186,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 // ExchangeWithoutCache a batch of dns request, and it do NOT GET from cache
 func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
+	epoch, flightKey := r.forkQueryKey(q)
 
 	retryNum := 0
 	retryMax := 3
@@ -202,7 +204,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			}
 
 			if cache {
-				putMsgToCache(r.cache, q, result)
+				r.forkPutMsgToCache(epoch, q, result)
 			}
 		}()
 
@@ -220,7 +222,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		return
 	}
 
-	ch := r.group.DoChan(q.String(), fn)
+	ch := r.group.DoChan(flightKey, fn)
 
 	var result singleflight.Result[*D.Msg]
 
@@ -236,7 +238,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 				result := <-ch
 				ret, err, shared := result.Val, result.Err, result.Shared
 				if err != nil && !shared && ret.Opcode < retryMax { // retry
-					r.group.DoChan(q.String(), fn)
+					r.group.DoChan(flightKey, fn)
 				}
 			}()
 			return nil, ctx.Err()
@@ -245,7 +247,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 
 	ret, err, shared := result.Val, result.Err, result.Shared
 	if err != nil && !shared && ret.Opcode < retryMax { // retry
-		r.group.DoChan(q.String(), fn)
+		r.group.DoChan(flightKey, fn)
 	}
 
 	if err == nil {
@@ -391,9 +393,7 @@ func (r *Resolver) Invalid() bool {
 }
 
 func (r *Resolver) ClearCache() {
-	if r != nil && r.cache != nil {
-		r.cache.Clear()
-	}
+	r.ForkInvalidateCache()
 }
 
 func (r *Resolver) ResetConnection() {

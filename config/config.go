@@ -749,6 +749,10 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 
+	if err := forkCheckSubnetConfig(config, rawCfg); err != nil {
+		return nil, err
+	}
+
 	elapsedTime := time.Since(startTime) / time.Millisecond                     // duration in ms
 	log.Infoln("Initial configuration complete, total time: %dms", elapsedTime) //Segment finished in xxm
 
@@ -923,6 +927,10 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			hasGlobal = true
 		}
 		proxyList = append(proxyList, groupName)
+	}
+
+	if groupsConfig, err = forkPrepareSubnetGroups(groupsConfig); err != nil {
+		return nil, nil, err
 	}
 
 	// check if any loop exists and sort the ProxyGroups
