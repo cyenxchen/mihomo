@@ -43,6 +43,8 @@ rules:
 
 选择变化时同步更新选择、关闭链路含该组的 TCP/UDP 连接（包括 DNS）、推进 DNS 缓存代次并清空、重置 DNS 连接。fake-ip 映射保留。未改变选择时不执行这些副作用。
 
+Android（或已安装 socket hook）上，DNS 服务器的 `#名称` 查不到出站时会被当成网卡名，而网卡绑定被忽略，查询直接从物理网络发出。因此存在 subnet 组时：`nameserver-policy` 与 `proxy-server-nameserver-policy` 中查不到的 `#名称` 加载报错，防止公司 DNS 因名字写错外泄；`nameserver`、`fallback`、`default-nameserver`、`proxy-server-nameserver`、`direct-nameserver` 中查不到的不检查、不告警，与上游一致（例如 ClashMi 内置 DNS 覆盖自带的 `#DNS`）。公司 DNS 应写在 `nameserver-policy` 中。
+
 L3 出站的域名先按主解析器策略解析，解析失败就失败，不回退公网 DNS。UDP 首包及同一会话后续域名包都遵循此策略。拨号途中选择改变时，新连接会关闭并报错。
 
 `SupportUDP` 在 API 中恒为 true，以防 UDP 规则被跳过；组 `disable-udp` 或当前成员不支持 UDP 时，发包返回错误。Tailscale 默认未开启 UDP，因此需要 **`udp: true`**。单纯看到 API 的 `udp: true` 不代表底层支持 UDP。

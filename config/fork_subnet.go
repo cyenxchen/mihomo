@@ -52,17 +52,22 @@ func forkSubnetChecks(cfg *Config, raw *RawConfig, hook bool) ([]string, error) 
 	if !d.Enable {
 		warnings = append(warnings, "dns.enable is false; subnet domain resolution uses system DNS")
 	}
-	servers := append([]dns.NameServer{}, d.NameServer...)
-	for _, list := range [][]dns.NameServer{d.Fallback, d.DefaultNameserver, d.ProxyServerNameserver, d.DirectNameServer} {
+	var servers []dns.NameServer
+	for _, list := range [][]dns.NameServer{d.NameServer, d.Fallback, d.DefaultNameserver, d.ProxyServerNameserver, d.DirectNameServer} {
 		servers = append(servers, list...)
 	}
+	mainCount := len(servers)
 	for _, list := range [][]dns.Policy{d.NameServerPolicy, d.ProxyServerPolicy} {
 		for _, p := range list {
 			servers = append(servers, p.NameServers...)
 		}
 	}
-	for _, ns := range servers {
-		if hook && ns.ProxyName != "" && ns.ProxyName != "RULES" && cfg.Proxies[ns.ProxyName] == nil {
+	for i, ns := range servers {
+		// Policy servers carry the subnet-routed corporate DNS, so a dangling
+		// name there would silently leak queries to the physical network.
+		// Main lists keep upstream behavior (GUI defaults such as ClashMi's
+		// "#DNS" rely on it).
+		if hook && i >= mainCount && ns.ProxyName != "" && ns.ProxyName != "RULES" && cfg.Proxies[ns.ProxyName] == nil {
 			return warnings, fmt.Errorf("subnet: DNS proxy %q not found with socket hook", ns.ProxyName)
 		}
 		if g := groups[ns.ProxyName]; g != nil && ns.Net == "" {

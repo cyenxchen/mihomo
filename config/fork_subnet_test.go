@@ -51,14 +51,15 @@ func TestForkSubnetLoadChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{Proxies: proxies, DNS: &DNS{Enable: false, NameServer: []dns.NameServer{{Addr: "10.1.1.1:53", ProxyName: "Typo"}}}}
+	policy := dns.Policy{Domain: "+.corp.example", NameServers: []dns.NameServer{{Addr: "10.1.1.1:53", ProxyName: "Typo"}}}
+	cfg := &Config{Proxies: proxies, DNS: &DNS{Enable: false, NameServerPolicy: []dns.Policy{policy}}}
 	if _, err := forkSubnetChecks(cfg, raw, true); err == nil {
 		t.Fatal("hook target accepted")
 	}
 	if _, err := forkSubnetChecks(cfg, raw, false); err != nil {
 		t.Fatal(err)
 	}
-	cfg.DNS.NameServer[0].ProxyName = "Corp"
+	cfg.DNS.NameServerPolicy[0].NameServers[0].ProxyName = "Corp"
 	warnings, err := forkSubnetChecks(cfg, raw, true)
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +70,46 @@ func TestForkSubnetLoadChecks(t *testing.T) {
 	cfg.Proxies = nil
 	if _, err := forkSubnetChecks(cfg, raw, true); err != nil {
 		t.Fatal("unrelated config rejected", err)
+	}
+}
+
+func TestForkSubnetUnknownMainDNSProxyIgnored(t *testing.T) {
+	raw := forkSubnetRaw()
+	proxies, _, err := parseProxies(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := []dns.NameServer{{Addr: "1.1.1.1:443", ProxyName: "DNS"}}
+	for name, set := range map[string]func(*DNS){
+		"nameserver":              func(d *DNS) { d.NameServer = unknown },
+		"fallback":                func(d *DNS) { d.Fallback = unknown },
+		"default-nameserver":      func(d *DNS) { d.DefaultNameserver = unknown },
+		"proxy-server-nameserver": func(d *DNS) { d.ProxyServerNameserver = unknown },
+		"direct-nameserver":       func(d *DNS) { d.DirectNameServer = unknown },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{Proxies: proxies, DNS: &DNS{Enable: true}}
+			set(cfg.DNS)
+			warnings, err := forkSubnetChecks(cfg, raw, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(strings.Join(warnings, "\n"), `"DNS"`) {
+				t.Fatal(warnings)
+			}
+		})
+	}
+	for name, set := range map[string]func(*DNS){
+		"nameserver-policy":              func(d *DNS) { d.NameServerPolicy = []dns.Policy{{Domain: "+.corp.example", NameServers: unknown}} },
+		"proxy-server-nameserver-policy": func(d *DNS) { d.ProxyServerPolicy = []dns.Policy{{Domain: "+.corp.example", NameServers: unknown}} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{Proxies: proxies, DNS: &DNS{Enable: true}}
+			set(cfg.DNS)
+			if _, err := forkSubnetChecks(cfg, raw, true); err == nil {
+				t.Fatal("unknown policy DNS proxy accepted")
+			}
+		})
 	}
 }
 

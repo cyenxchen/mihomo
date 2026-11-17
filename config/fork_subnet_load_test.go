@@ -15,13 +15,21 @@ func TestForkSubnetDNSUnknownHookTarget(t *testing.T) {
 	before := dialer.DefaultSocketHook
 	defer func() { dialer.DefaultSocketHook = before }()
 	dialer.DefaultSocketHook = func(string, string, syscall.RawConn) error { return nil }
-	c := config.DefaultRawConfig()
-	c.ProxyGroup = []map[string]any{{"name": "Corp", "type": "subnet", "default": "REJECT", "matches": []any{map[string]any{"type": "wifi", "proxy": "DIRECT"}}}}
-	c.DNS.NameServer = []string{"1.1.1.1#Typo"}
-	c.DNS.FallbackFilter.GeoIP = false
-	_, err := config.ParseRawConfig(c)
-	if err == nil || !strings.Contains(err.Error(), "Typo") {
-		t.Fatalf("unknown DNS target accepted or wrong error: %v", err)
+	parse := func(dns string) error {
+		c := config.DefaultRawConfig()
+		c.DNS.FallbackFilter.GeoIP = false
+		source := "proxy-groups:\n  - {name: Corp, type: subnet, default: REJECT, matches: [{type: wifi, proxy: DIRECT}]}\ndns:\n" + dns
+		if err := yaml.Unmarshal([]byte(source), c); err != nil {
+			t.Fatal(err)
+		}
+		_, err := config.ParseRawConfig(c)
+		return err
+	}
+	if err := parse("  nameserver-policy:\n    '+.corp.example': '10.1.1.1#Typo'\n"); err == nil || !strings.Contains(err.Error(), "Typo") {
+		t.Fatalf("unknown policy DNS target accepted or wrong error: %v", err)
+	}
+	if err := parse("  nameserver: ['https://1.1.1.1/dns-query#DNS&h3=true']\n"); err != nil {
+		t.Fatalf("unknown main DNS target rejected: %v", err)
 	}
 }
 
