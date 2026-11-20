@@ -1,95 +1,59 @@
 # AGENTS.md
 
-本文件为 Codex (Codex.ai/code) 在此仓库中工作时提供指导。
+本仓库是基于 MetaCubeX/mihomo 的 Go 网络代理内核 fork。功能概览和用户配置见 [README.md](README.md)。本文件给出构建、验证和修改代码时的主要入口。
 
-## 项目概述
+## 构建与配置校验
 
-Mihomo（Meta Kernel）是一个用 Go 编写的高性能网络代理服务器，支持多种协议（VMess、VLESS、Shadowsocks、Trojan、Snell、TUIC、Hysteria、WireGuard 等），具备基于规则的流量路由、内置 DNS 和 RESTful API 控制器。属于 MetaCubeX 生态系统，从 Clash 分支而来。
+```sh
+CGO_ENABLED=0 go build -tags with_gvisor
+./mihomo -t -d /path/to/test-home -f /path/to/config.yaml
 
-## 构建命令
-
-```bash
-# 快速构建（当前平台）
-go build
-
-# 启用 gVisor TUN 协议栈构建（Makefile 默认使用）
-go build -tags with_gvisor
-
-# 完整生产构建（静态链接、去除符号表、附带版本信息）
-CGO_ENABLED=0 go build -tags with_gvisor -trimpath -ldflags '-w -s'
-
-# 通过 Makefile 交叉编译（例如 darwin-arm64、linux-amd64-v3）
 make darwin-arm64
 make linux-amd64-v3
-
-# 构建所有默认平台
 make all
 ```
 
+- `with_gvisor` 启用 gVisor 相关实现，也用于编入 Tailscale 出站。设置 `no_tailscale` 会排除 Tailscale 实现。
+- [Makefile](Makefile) 的平台目标把带版本和构建时间的二进制写到 `bin/`。`make all` 构建 Linux、macOS 和 Windows 的 amd64-v3、arm64 六个目标，`make all-arch` 才遍历全部列出的目标。
+- fork 的正式发布使用 [sync-and-build.yml](.github/workflows/sync-and-build.yml) 指定的 Go 工具链和构建矩阵。Linux、macOS、Windows 发布使用 `CGO_ENABLED=0`，Android 发布使用 NDK 和 `CGO_ENABLED=1`。内嵌 Android 客户端还需关注 `android && cmfa` 路径。
+- `-t` 校验当前设备展开后的配置。验证端口绑定、TLS 握手或重载行为时，另外用临时配置和回环地址运行内核。
+
 ## 测试与代码检查
 
-```bash
-# 运行所有测试
-go test ./... -v -count=1
-
-# 运行单个测试
-go test -v -run TestFunctionName ./path/to/package
-
-# 协议集成测试（在 test/ 目录下，顺序执行）
-cd test && go test -p 1 -v ./...
-
-# 代码检查（需要 golangci-lint）
-golangci-lint run ./...
+```sh
+CGO_ENABLED=0 go test -count=1 -run '^TestDeviceOverridesLoad$' ./config
+CGO_ENABLED=0 SKIP_INTEROP_TEST=1 go test -count=1 ./...
+CGO_ENABLED=0 SKIP_INTEROP_TEST=1 go test -tags with_gvisor -count=1 ./...
+CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 ./hub/...
+make lint
 ```
 
-## 代码检查规则
+- 优先运行与改动相关的用例和包。需要对照 CI 时，查 [test.yml](.github/workflows/test.yml) 的平台和标签矩阵，以及 [fork 发布流程](.github/workflows/sync-and-build.yml) 的定向测试。测试矩阵会在 macOS 跳过 `listener/inbound` 的测试文件。本地排查时可用 `go test -run` 单独运行该包的目标用例。
+- Linux 透明 UDP 监听用例依赖相应的 socket 权限。需要验证权限降级时，使用无相关能力的 Linux 进程，并核对用例实际执行。交叉构建只验证编译。
+- [test/](test/README.md) 是独立 Go 模块，协议集成测试在 Docker 可用的环境执行 `make -C test test`。
+- 检查器由 [.golangci.yaml](.golangci.yaml) 配置，包括 `gofumpt`、`staticcheck`、`govet`、`gci`。导入顺序为标准库、`github.com/metacubex/mihomo`、第三方库。常用别名为 `constant` → `C`、`common/net` → `N`、`constant/provider` → `P`。
 
-启用的检查器：**gofumpt**、**staticcheck**、**govet**、**gci**。
+## 代码入口
 
-导入排序（由 gci 强制执行）：
-1. 标准库
-2. `github.com/metacubex/mihomo`（项目内部）
-3. 第三方库
+| 目录 | 职责 |
+| --- | --- |
+| `config/` | YAML 默认值、解码和校验，生成运行时配置 |
+| `hub/executor/`、`hub/route/` | 应用配置、初始化 provider、协调控制器和 REST 配置重载 |
+| `listener/`、`adapter/inbound/` | 套接字绑定、入站协议处理和连接元数据 |
+| `tunnel/`、`rules/` | 接收 TCP/UDP 流量、规则匹配和连接转发 |
+| `adapter/outbound/`、`adapter/outboundgroup/` | 出站协议、代理组选择和拨号 |
+| `adapter/provider/`、`rules/provider/`、`component/resource/` | 代理订阅、规则集和资源下载 |
+| `dns/`、`component/resolver/`、`component/fakeip/` | DNS 服务、解析器选择、缓存和 Fake-IP 映射 |
+| `constant/`、`transport/` | 共用接口和底层协议实现 |
 
-## 架构
+- 配置加载分为 `config.UnmarshalRawConfig` 和 `config.ParseRawConfig`。设备覆写在原始 YAML 解码阶段生效。内嵌客户端在系统 VPN 及应用配置补丁之前调用 `config.ExpandDeviceOverrides`。
+- 独立进程启动与 `SIGHUP` 通过 `hub.Parse` 进入 `route.ParseConfig`，经 executor 读取和解析配置，再由 `forkApplyConfig` 协调 `executor.ApplyConfigWithListeners` 和控制器。内嵌客户端传入已解析配置时走 `hub.ApplyConfig`。
+- REST `PUT /configs` 重新解析配置。切入、切出和重载设备配置会更新代理、DNS 与控制器监听。普通配置沿用 `force` 语义。`PATCH /configs` 只改运行时设置。处理监听改动时，参考 `hub/fork_device_reload_test.go` 和 [设备覆写示例](docs/device-overrides.yaml)。
+- 流量从监听器进入 `tunnel.HandleTCPConn` 或 `tunnel.HandleUDPPacket`，再经规则和代理组选择出站。独立程序入口对 `net.DefaultResolver` 的默认拨号设置了进程退出守卫。需要解析域名时沿用 `component/resolver` 的相应解析路径。
 
-### 连接流程
+## Fork 功能入口
 
-```
-入站连接 → listener/* → tunnel.HandleTCPConn/HandleUDPPacket
-  → 规则匹配 → 代理组选择 → adapter/outbound/* → 远端服务器
-```
-
-### 核心包
-
-| 包 | 职责 |
-|---|------|
-| `constant/` | 核心接口（`ProxyAdapter`、`Conn`、`Rule`、`Proxy`）和类型枚举 |
-| `config/` | YAML 配置文件解析 |
-| `adapter/inbound/` | 入站连接适配器（HTTP、SOCKS5、Vless 等） |
-| `adapter/outbound/` | 出站协议实现（27+ 种协议） |
-| `adapter/outboundgroup/` | 代理组策略：Selector、Fallback、URLTest、LoadBalance |
-| `adapter/provider/` | 动态代理/规则提供者管理 |
-| `listener/` | 协议特定的服务监听器 |
-| `transport/` | 底层协议传输实现 |
-| `tunnel/` | 核心连接路由及 TCP/UDP 队列管理 |
-| `rules/` | 路由规则引擎（域名、GEOIP、IPCIDR、进程、逻辑运算符） |
-| `dns/` | DNS 服务器，支持 DoH/DoT 和 Fake IP |
-| `component/` | 共享组件：拨号器、解析器、进程检测、fakeip、地理数据 |
-| `hub/executor/` | 配置应用——将监听器、代理、规则、DNS 组装在一起 |
-| `hub/route/` | RESTful API 控制器（使用 chi 路由器） |
-
-### 启动路径
-
-`main.go` → `hub.Parse()` → `executor.Parse()` → `config.Parse()`（YAML）→ `executor.ApplyConfig()`（应用到所有子系统）→ `route.ReCreateServer()`（API）
-
-收到 SIGHUP 信号后的配置重载遵循相同路径：`hub.Parse()` → `ApplyConfig()`。
-
-### 代码约定
-
-- `constant` 包按惯例导入为 `C`：`C "github.com/metacubex/mihomo/constant"`
-- `common/net` 导入为 `N`：`N "github.com/metacubex/mihomo/common/net"`
-- `constant/provider` 导入为 `P`：`P "github.com/metacubex/mihomo/constant/provider"`
-- 构建标签 `with_gvisor` 用于启用基于 gVisor 的 TUN 协议栈
-- 所有构建均禁用 CGO（`CGO_ENABLED=0`）
-- `net.DefaultResolver` 在 main.go 中被故意"毒化"——所有 DNS 请求必须通过 mihomo 的解析器
+- `policy-priority` 和 `select.default` 的匹配逻辑及测试位于 `adapter/outboundgroup/`。配置字段还要检查 `config/` 和 [docs/config.yaml](docs/config.yaml)。
+- `subnet` 涉及 `component/netenv/` 的网络快照、`adapter/outboundgroup/fork_subnet.go` 的出站选择、`hub/executor/fork_subnet.go` 的连接回收及 DNS 缓存失效。验证切网时检查实际出站与 DNS 路径。配置、`/network` 接口及平台限制见 [subnet 文档](docs/fork_subnet.md)。
+- Tailscale 的移动网络通知和控制节点健康状态在 `adapter/outbound/tailscale*.go`。随网络变化、重载或切换运行模式的改动，应核对内嵌入口以及独立内核入口。
+- [发布工作流](.github/workflows/sync-and-build.yml) 会把 `Meta` 的 fork 提交重放到上游稳定版标签后再构建。修改上游共用入口时，把 fork 特有逻辑尽量留在对应的 fork 模块，方便后续跟进上游。
