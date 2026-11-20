@@ -17,7 +17,6 @@ import (
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/orderedmap"
 	"github.com/metacubex/mihomo/common/utils"
-	"github.com/metacubex/mihomo/common/yaml"
 	"github.com/metacubex/mihomo/component/age"
 	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/cidr"
@@ -193,6 +192,8 @@ type TLS struct {
 
 // Config is mihomo config manager
 type Config struct {
+	HasDeviceOverrides bool `json:"-"`
+
 	General       *General
 	Controller    *Controller
 	Experimental  *Experimental
@@ -402,6 +403,8 @@ type RawTLS struct {
 }
 
 type RawConfig struct {
+	hasDeviceOverrides bool
+
 	Port                          int                     `yaml:"port" json:"port"`
 	SocksPort                     int                     `yaml:"socks-port" json:"socks-port"`
 	RedirPort                     int                     `yaml:"redir-port" json:"redir-port"`
@@ -615,7 +618,7 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		return nil, fmt.Errorf("decrypt config error: %w", err)
 	}
 
-	if err := yaml.Unmarshal(buf, rawCfg); err != nil {
+	if err := forkLoadDeviceConfig(buf, rawCfg); err != nil {
 		return nil, err
 	}
 
@@ -623,7 +626,7 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 }
 
 func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
-	config := &Config{}
+	config := &Config{HasDeviceOverrides: rawCfg.hasDeviceOverrides}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()
 

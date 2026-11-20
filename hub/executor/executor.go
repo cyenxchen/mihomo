@@ -101,11 +101,17 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 
 // ApplyConfig dispatch configure to all parts without ExternalController
 func ApplyConfig(cfg *config.Config, force bool) {
-	applyConfig(cfg, force)
+	ApplyConfigWithListeners(cfg, force, false, nil)
+}
+
+// ApplyConfigWithListeners lets the control API serve local settings before a
+// slow provider has finished loading. The embedding hook still runs last.
+func ApplyConfigWithListeners(cfg *config.Config, force, full bool, listenersReady func()) {
+	applyConfig(cfg, force, full, listenersReady)
 	notifyApplyConfigHook(cfg)
 }
 
-func applyConfig(cfg *config.Config, force bool) {
+func applyConfig(cfg *config.Config, force, full bool, listenersReady func()) {
 	mux.Lock()
 	defer mux.Unlock()
 	log.SetLevel(cfg.General.LogLevel)
@@ -129,10 +135,13 @@ func applyConfig(cfg *config.Config, force bool) {
 	updateGeneral(cfg.General, true)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
-	updateListeners(cfg.General, cfg.Listeners, force)
+	updateListeners(cfg.General, cfg.Listeners, force, full)
 	updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
+	if listenersReady != nil {
+		listenersReady()
+	}
 
 	tunnel.OnInnerLoading()
 
@@ -208,8 +217,8 @@ func GetGeneral() *config.General {
 	return general
 }
 
-func updateListeners(general *config.General, listeners map[string]C.InboundListener, force bool) {
-	listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
+func updateListeners(general *config.General, listeners map[string]C.InboundListener, force, full bool) {
+	_ = listener.EnsureInboundListeners(listeners, tunnel.Tunnel, true, full)
 	if !force {
 		return
 	}
@@ -309,7 +318,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
 	resolver.DefaultService = s
-	resolver.UseSystemHosts = c.UseSystemHosts
+	resolver.SetUseSystemHosts(c.UseSystemHosts)
 
 	if r.ProxyResolver.Invalid() {
 		resolver.ProxyServerHostResolver = r.ProxyResolver
@@ -329,7 +338,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
-	resolver.DefaultHosts = resolver.NewHosts(tree)
+	resolver.SetDefaultHosts(tree)
 }
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {

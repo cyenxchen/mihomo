@@ -1,0 +1,63 @@
+# 默认三个入口都监听 IPv4 回环。下方点名的 Linux 网关同时改用 LAN 混合代理、HTTPS 控制器和 DNS。
+# 部署时替换网关名和三处 192.0.2.1，填写该网关的专用 LAN IPv4。
+# 在 -d 指定的配置目录下准备 gateway-tls/ 中的服务端证书、私钥及客户端 CA 证书。
+# 代理和控制器都要求客户端出示该 CA 签发的证书。客户端须信任服务端证书，并按其 SAN 访问。
+# 原位替换 gateway-tls/client-ca.pem 后发送 SIGHUP。完整重载后，混合代理和 HTTPS 控制器新接入的 TCP 连接均按新 CA 验证。
+# 混合代理会保留重载前已接收的 TCP 连接，包括仍在进行 TLS 握手的连接。
+# 证书文件缺失时代理和控制器不会启动。DNS 可以独立启动。
+# DNS 的 TCP 和 UDP 无客户端鉴权，开放前须用主机防火墙限制到可信入接口和客户端网段。
+mixed-port: 7893
+allow-lan: false
+external-controller: 127.0.0.1:9090
+dns:
+  enable: true
+  listen: 127.0.0.1:7874
+  nameserver: [1.1.1.1]
+  fallback-filter: {geoip: false}
+rules:
+  - MATCH,REJECT
+
+device-overrides:
+  - when: {os: linux, device-name: example-home-gateway}
+    set:
+      mixed-port: 0
+      external-controller: ""
+      external-controller-tls: 192.0.2.1:9090
+      tls:
+        certificate: &gateway-cert gateway-tls/server.pem
+        private-key: &gateway-key gateway-tls/server.key
+        client-auth-type: require-and-verify
+        client-auth-cert: &gateway-client-ca gateway-tls/client-ca.pem
+      listeners:
+        - name: gateway-mixed
+          type: mixed
+          listen: 192.0.2.1
+          port: 7893
+          udp: false
+          certificate: *gateway-cert
+          private-key: *gateway-key
+          client-auth-type: require-and-verify
+          client-auth-cert: *gateway-client-ca
+      dns: {listen: '192.0.2.1:7874'}
+
+  - when: {os: darwin, device-name: ["Example MacBook Pro", "Example Mac mini"]}
+    prepend:
+      rules:
+        - DOMAIN,mac-only.example,DIRECT
+
+# when 各字段同时满足，同一字段的列表命中任一项即可。名称区分大小写。
+# 多个块可以同时命中。set 按书写顺序递归合并映射，标量和列表以后写的值为准。
+# 所有命中的 prepend.rules 保持书写顺序，排在最终的公共规则之前。
+# 未命中时按公共配置运行。忽略此扩展的旧内核也会使用示例的回环监听。
+# SIGHUP 和 REST PUT /configs 均重新匹配设备。切入、切出或重载设备配置时，PUT 无需 force=true 即应用监听变更。
+# 两份配置均未使用 device-overrides 时，PUT 沿用原有 force 行为。PATCH 只更新运行时设置，不重新匹配设备。
+# 控制器重建后，客户端须重新连接。若 Windows 重建了正在使用的命名管道，PUT 客户端可能收到 EOF，
+# 此时应连接重载后的控制端点核对实际配置。
+#
+# mihomo -t -f device-overrides.yaml 检查所有块的格式，再完整校验当前设备展开后的配置。
+# 日志列出命中块的序号（从 0 开始）。监听与证书握手须在启动后验证。
+# 名称优先取 -device-name，其次取 MIHOMO_DEVICE_NAME；macOS 对应 os: darwin，自动取电脑名称，
+# Linux 自动取主机名。Android 独立运行时可显式指定名称，也可以只按 os 匹配。
+# Android CMFA 客户端应在准备 VPN、合并应用补丁前，调用
+# config.ExpandDeviceOverrides(profile, "android", deviceName)，下游使用展开后的配置。
+# 仍传入原始条件块的旧客户端会收到警告，并继续使用公共配置。

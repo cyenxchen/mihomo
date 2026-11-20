@@ -67,6 +67,7 @@ func (s *Socks) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	s.stl, s.sul = nil, nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -83,7 +84,14 @@ func (s *Socks) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (s *Socks) Listen(tunnel C.Tunnel) error {
+func (s *Socks) Listen(tunnel C.Tunnel) (err error) {
+	var started Socks
+	defer func() {
+		if err != nil {
+			_ = started.Close()
+		}
+	}()
+
 	lc := s.ListenConfig()
 	for _, addr := range strings.Split(s.RawAddress(), ",") {
 		config := LC.AuthServer{
@@ -101,15 +109,17 @@ func (s *Socks) Listen(tunnel C.Tunnel) error {
 		if err != nil {
 			return err
 		}
-		s.stl = append(s.stl, stl)
+		started.stl = append(started.stl, stl)
 		if s.udp {
 			sul, err := socks.NewUDPWithConfig(config, lc, tunnel, s.Additions()...)
 			if err != nil {
 				return err
 			}
-			s.sul = append(s.sul, sul)
+			started.sul = append(started.sul, sul)
 		}
 	}
+	s.stl = append(s.stl, started.stl...)
+	s.sul = append(s.sul, started.sul...)
 
 	log.Infoln("SOCKS[%s] proxy listening at: %s", s.Name(), s.Address())
 	return nil

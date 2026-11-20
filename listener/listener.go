@@ -1,6 +1,8 @@
 package listener
 
 import (
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -8,9 +10,11 @@ import (
 	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/http"
+	IN "github.com/metacubex/mihomo/listener/inbound"
 	"github.com/metacubex/mihomo/listener/mixed"
 	"github.com/metacubex/mihomo/listener/redir"
 	embedSS "github.com/metacubex/mihomo/listener/shadowsocks"
@@ -35,6 +39,7 @@ var (
 	httpListener        *http.Listener
 	redirListener       *redir.Listener
 	redirUDPListener    *tproxy.UDPListener
+	redirUDPDenied      bool
 	tproxyListener      *tproxy.Listener
 	tproxyUDPListener   *tproxy.UDPListener
 	mixedListener       *mixed.Listener
@@ -198,49 +203,47 @@ func ReCreateSocks(port int, tunnel C.Tunnel) {
 }
 
 func ReCreateRedir(port int, tunnel C.Tunnel) {
+	if err := EnsureRedir(port, tunnel); err != nil {
+		log.Errorln("Start Redir server error: %s", err)
+	}
+}
+
+func EnsureRedir(port int, tunnel C.Tunnel) error {
 	redirMux.Lock()
 	defer redirMux.Unlock()
 
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start Redir server error: %s", err.Error())
-		}
-	}()
-
 	addr := genAddr(bindAddress, port, allowLan)
-
-	if redirListener != nil {
-		if redirListener.RawAddress() == addr {
-			return
-		}
+	if redirListener != nil && redirListener.RawAddress() != addr {
 		redirListener.Close()
 		redirListener = nil
+		redirUDPDenied = false
 	}
-
-	if redirUDPListener != nil {
-		if redirUDPListener.RawAddress() == addr {
-			return
-		}
+	if redirUDPListener != nil && redirUDPListener.RawAddress() != addr {
 		redirUDPListener.Close()
 		redirUDPListener = nil
 	}
 
-	if portIsZero(addr) {
-		return
+	if port == 0 {
+		return nil
 	}
-
-	redirListener, err = redir.New(addr, tunnel)
-	if err != nil {
-		return
+	if redirListener == nil {
+		l, err := redir.New(addr, tunnel)
+		if err != nil {
+			return err
+		}
+		redirListener = l
+		log.Infoln("Redirect proxy listening at: %s", l.Address())
 	}
-
-	redirUDPListener, err = tproxy.NewUDP(addr, tunnel)
-	if err != nil {
-		log.Warnln("Failed to start Redir UDP Listener: %s", err)
+	err := ensureTransparentUDP(&redirUDPListener, addr, tunnel)
+	if errors.Is(err, tproxy.ErrTransparentUDPPermission) {
+		if !redirUDPDenied {
+			log.Warnln("Redir TCP is listening without transparent UDP: %v", err)
+		}
+		redirUDPDenied = true
+		return nil
 	}
-
-	log.Infoln("Redirect proxy listening at: %s", redirListener.Address())
+	redirUDPDenied = false
+	return err
 }
 
 func ReCreateShadowSocks(shadowSocksConfig string, tunnel C.Tunnel) {
@@ -395,49 +398,49 @@ func ReCreateTuic(config LC.TuicServer, tunnel C.Tunnel) {
 }
 
 func ReCreateTProxy(port int, tunnel C.Tunnel) {
+	if err := EnsureTProxy(port, tunnel); err != nil {
+		log.Errorln("Start TProxy server error: %s", err)
+	}
+}
+
+func EnsureTProxy(port int, tunnel C.Tunnel) error {
 	tproxyMux.Lock()
 	defer tproxyMux.Unlock()
 
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start TProxy server error: %s", err.Error())
-		}
-	}()
-
 	addr := genAddr(bindAddress, port, allowLan)
-
-	if tproxyListener != nil {
-		if tproxyListener.RawAddress() == addr {
-			return
-		}
+	if tproxyListener != nil && tproxyListener.RawAddress() != addr {
 		tproxyListener.Close()
 		tproxyListener = nil
 	}
-
-	if tproxyUDPListener != nil {
-		if tproxyUDPListener.RawAddress() == addr {
-			return
-		}
+	if tproxyUDPListener != nil && tproxyUDPListener.RawAddress() != addr {
 		tproxyUDPListener.Close()
 		tproxyUDPListener = nil
 	}
 
-	if portIsZero(addr) {
-		return
+	if port == 0 {
+		return nil
 	}
+	if tproxyListener == nil {
+		l, err := tproxy.New(addr, tunnel)
+		if err != nil {
+			return err
+		}
+		tproxyListener = l
+		log.Infoln("TProxy server listening at: %s", l.Address())
+	}
+	return ensureTransparentUDP(&tproxyUDPListener, addr, tunnel)
+}
 
-	tproxyListener, err = tproxy.New(addr, tunnel)
+func ensureTransparentUDP(active **tproxy.UDPListener, addr string, tunnel C.Tunnel) error {
+	if *active != nil || !tproxy.SupportUDP {
+		return nil
+	}
+	l, err := tproxy.NewUDP(addr, tunnel)
 	if err != nil {
-		return
+		return fmt.Errorf("UDP listener at %s: %w", addr, err)
 	}
-
-	tproxyUDPListener, err = tproxy.NewUDP(addr, tunnel)
-	if err != nil {
-		log.Warnln("Failed to start TProxy UDP Listener: %s", err)
-	}
-
-	log.Infoln("TProxy server listening at: %s", tproxyListener.Address())
+	*active = l
+	return nil
 }
 
 func ReCreateMixed(port int, tunnel C.Tunnel) {
@@ -481,17 +484,18 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 		return
 	}
 
-	mixedListener, err = mixed.New(addr, tunnel)
+	tcpListener, err := mixed.New(addr, tunnel)
 	if err != nil {
 		return
 	}
 
-	mixedUDPLister, err = socks.NewUDP(addr, tunnel)
+	udpListener, err := socks.NewUDP(addr, tunnel)
 	if err != nil {
-		mixedListener.Close()
+		tcpListener.Close()
 		return
 	}
 
+	mixedListener, mixedUDPLister = tcpListener, udpListener
 	log.Infoln("Mixed(http+socks) proxy listening at: %s", mixedListener.Address())
 }
 
@@ -625,32 +629,57 @@ func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 }
 
 func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C.Tunnel, dropOld bool) {
+	_ = EnsureInboundListeners(newListenerMap, tunnel, dropOld, false)
+}
+
+func usesClientCAFile(config C.InboundConfig) bool {
+	var cert, authType string
+	switch o := config.(type) {
+	case *IN.MixedOption:
+		cert, authType = o.ClientAuthCert, o.ClientAuthType
+	case *IN.HTTPOption:
+		cert, authType = o.ClientAuthCert, o.ClientAuthType
+	case *IN.SocksOption:
+		cert, authType = o.ClientAuthCert, o.ClientAuthType
+	default:
+		return false
+	}
+	auth := ca.ClientAuthTypeFromString(authType)
+	return cert != "" && auth != ca.RequireAnyClientCert && auth != ca.RequestClientCert &&
+		!x509.NewCertPool().AppendCertsFromPEM([]byte(cert))
+}
+
+func EnsureInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C.Tunnel, dropOld, reloadClientCA bool) error {
 	inboundMux.Lock()
 	defer inboundMux.Unlock()
 
+	for name, oldListener := range inboundListeners {
+		newListener, configured := newListenerMap[name]
+		keep := !dropOld
+		if configured {
+			cfg := newListener.Config()
+			keep = oldListener.Config().Equal(cfg) && !(reloadClientCA && usesClientCAFile(cfg))
+		}
+		if keep {
+			continue
+		}
+		_ = oldListener.Close()
+		delete(inboundListeners, name)
+	}
+
+	var errs []error
 	for name, newListener := range newListenerMap {
-		if oldListener, ok := inboundListeners[name]; ok {
-			if !oldListener.Config().Equal(newListener.Config()) {
-				_ = oldListener.Close()
-			} else {
-				continue
-			}
+		if _, active := inboundListeners[name]; active {
+			continue
 		}
 		if err := newListener.Listen(tunnel); err != nil {
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
+			errs = append(errs, fmt.Errorf("listener %s listen err: %w", name, err))
 			continue
 		}
 		inboundListeners[name] = newListener
 	}
-
-	if dropOld {
-		for name, oldListener := range inboundListeners {
-			if _, ok := newListenerMap[name]; !ok {
-				_ = oldListener.Close()
-				delete(inboundListeners, name)
-			}
-		}
-	}
+	return errors.Join(errs...)
 }
 
 // GetPorts return the ports of proxy servers

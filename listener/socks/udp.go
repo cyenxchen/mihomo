@@ -3,6 +3,7 @@ package socks
 import (
 	"context"
 	"net"
+	"sync/atomic"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
@@ -16,7 +17,7 @@ import (
 type UDPListener struct {
 	packetConn net.PacketConn
 	addr       string
-	closed     bool
+	closed     atomic.Bool
 }
 
 // RawAddress implements C.Listener
@@ -31,7 +32,7 @@ func (l *UDPListener) Address() string {
 
 // Close implements C.Listener
 func (l *UDPListener) Close() error {
-	l.closed = true
+	l.closed.Store(true)
 	return l.packetConn.Close()
 }
 
@@ -67,7 +68,7 @@ func NewUDPWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.T
 				if put != nil {
 					put()
 				}
-				if sl.closed {
+				if sl.closed.Load() {
 					break
 				}
 				continue

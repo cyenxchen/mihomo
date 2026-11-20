@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	_ "unsafe"
 
 	"github.com/metacubex/mihomo/component/resolver/hosts"
@@ -16,6 +17,7 @@ import (
 var (
 	DisableSystemHosts, _ = strconv.ParseBool(os.Getenv("DISABLE_SYSTEM_HOSTS"))
 	UseSystemHosts        bool
+	hostsMu               sync.RWMutex
 )
 
 type Hosts struct {
@@ -28,8 +30,34 @@ func NewHosts(hosts *trie.DomainTrie[HostValue]) Hosts {
 	}
 }
 
+// SetDefaultHosts publishes tree for lookups. Callers must not modify it afterwards.
+func SetDefaultHosts(tree *trie.DomainTrie[HostValue]) {
+	hostsMu.Lock()
+	DefaultHosts = NewHosts(tree)
+	hostsMu.Unlock()
+}
+
+func SetUseSystemHosts(enabled bool) {
+	hostsMu.Lock()
+	UseSystemHosts = enabled
+	hostsMu.Unlock()
+}
+
+func useSystemHostsEnabled() bool {
+	hostsMu.RLock()
+	enabled := UseSystemHosts
+	hostsMu.RUnlock()
+	return enabled
+}
+
 // Return the search result and whether to match the parameter `isDomain`
 func (h *Hosts) Search(domain string, isDomain bool) (*HostValue, bool) {
+	if h == &DefaultHosts {
+		hostsMu.RLock()
+		snapshot := *h
+		hostsMu.RUnlock()
+		h = &snapshot
+	}
 	if value := h.DomainTrie.Search(domain); value != nil {
 		hostValue := value.Data()
 		for {
@@ -50,7 +78,7 @@ func (h *Hosts) Search(domain string, isDomain bool) (*HostValue, bool) {
 		return &hostValue, false
 	}
 
-	if !isDomain && !DisableSystemHosts && UseSystemHosts {
+	if !isDomain && !DisableSystemHosts && useSystemHostsEnabled() {
 		addr, _ := hosts.LookupStaticHost(domain)
 		if hostValue, err := NewHostValue(addr); err == nil {
 			return &hostValue, true

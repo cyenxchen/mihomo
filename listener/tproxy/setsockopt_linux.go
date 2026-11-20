@@ -7,6 +7,8 @@ import (
 	"syscall"
 )
 
+const SupportUDP = true
+
 func setsockopt(rc syscall.RawConn, addr string) error {
 	isIPv6 := true
 	host, _, err := net.SplitHostPort(addr)

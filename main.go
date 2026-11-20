@@ -58,6 +58,9 @@ func getIntEnv(key string) int {
 }
 
 func init() {
+	flag.Func("device-name", "device name for device-overrides (MIHOMO_DEVICE_NAME)", func(name string) error {
+		return os.Setenv("MIHOMO_DEVICE_NAME", name)
+	})
 	flag.StringVar(&homeDir, "d", os.Getenv("CLASH_HOME_DIR"), "set configuration directory")
 	flag.StringVar(&configFile, "f", os.Getenv("CLASH_CONFIG_FILE"), "specify configuration file")
 	flag.StringVar(&configString, "config", os.Getenv("CLASH_CONFIG_STRING"), "specify base64-encoded configuration string")

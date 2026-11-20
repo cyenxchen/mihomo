@@ -142,8 +142,28 @@ type embedModeConfigPatch struct {
 }
 
 func getConfigs(w http.ResponseWriter, r *http.Request) {
-	general := executor.GetGeneral()
-	render.JSON(w, r, general)
+	view := forkPublishedGeneral.Load()
+	if forkReloadMu.TryLock() {
+		view = forkPublishGeneral()
+		forkReloadMu.Unlock()
+	}
+	// Retiring a controller cancels the base context of all its requests.
+	if r.Context().Err() != nil {
+		render.Status(r, http.StatusConflict)
+		render.JSON(w, r, newError("controller was reloaded"))
+		return
+	}
+	if view == nil {
+		render.Status(r, http.StatusServiceUnavailable)
+		render.JSON(w, r, newError("configuration is loading"))
+		return
+	}
+	if view.err != nil {
+		http.Error(w, view.err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(view.body)
 }
 
 func patchEmbedModeConfigs(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +182,12 @@ func patchEmbedModeConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !forkLockConfigRequest(w, r) {
+		return
+	}
+	defer forkReloadMu.Unlock()
 	tunnel.SetMode(*patch.Mode)
+	forkPublishGeneral()
 	log.Infoln("[CMFA] embedded config mode changed: %s", patch.Mode.String())
 	render.NoContent(w, r)
 }
@@ -380,6 +405,10 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !forkLockConfigRequest(w, r) {
+		return
+	}
+	defer forkReloadMu.Unlock()
 	if general.AllowLan != nil {
 		listener.SetAllowLan(*general.AllowLan)
 	}
@@ -440,6 +469,7 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 		resolver.DisableIPv6 = !*general.IPv6
 	}
 
+	forkPublishGeneral()
 	render.NoContent(w, r)
 }
 
@@ -455,6 +485,10 @@ func updateConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	force := r.URL.Query().Get("force") == "true"
+	if !forkLockConfigRequest(w, r) {
+		return
+	}
+	defer forkReloadMu.Unlock()
 	var cfg *config.Config
 	var err error
 
@@ -490,7 +524,12 @@ func updateConfigs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	executor.ApplyConfig(cfg, force)
+	current, _ := r.Context().Value(forkControllerConnKey{}).(*forkControllerConn)
+	if err := forkApplyConfig(cfg, force, false, current); err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError("configuration applied with listener errors: "+err.Error()))
+		return
+	}
 	render.NoContent(w, r)
 }
 

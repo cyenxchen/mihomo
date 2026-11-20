@@ -55,21 +55,30 @@ func (t *TProxy) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (t *TProxy) Listen(tunnel C.Tunnel) error {
+func (t *TProxy) Listen(tunnel C.Tunnel) (err error) {
+	var started TProxy
+	defer func() {
+		if err != nil {
+			_ = started.Close()
+		}
+	}()
+
 	for _, addr := range strings.Split(t.RawAddress(), ",") {
 		lTCP, err := tproxy.New(addr, tunnel, t.Additions()...)
 		if err != nil {
 			return err
 		}
-		t.lTCP = append(t.lTCP, lTCP)
+		started.lTCP = append(started.lTCP, lTCP)
 		if t.udp {
 			lUDP, err := tproxy.NewUDP(addr, tunnel, t.Additions()...)
 			if err != nil {
 				return err
 			}
-			t.lUDP = append(t.lUDP, lUDP)
+			started.lUDP = append(started.lUDP, lUDP)
 		}
 	}
+	t.lTCP = append(t.lTCP, started.lTCP...)
+	t.lUDP = append(t.lUDP, started.lUDP...)
 	log.Infoln("TProxy[%s] proxy listening at: %s", t.Name(), t.Address())
 	return nil
 }

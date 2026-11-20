@@ -93,11 +93,11 @@ func (s *ShadowSocks) Address() string {
 
 // Listen implements constant.InboundListener
 func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
-	var err error
-	s.l, err = sing_shadowsocks.New(s.ss, s.ListenConfig(), tunnel, s.Additions()...)
+	l, err := sing_shadowsocks.New(s.ss, s.ListenConfig(), tunnel, s.Additions()...)
 	if err != nil {
 		return err
 	}
+	s.l = l
 	log.Infoln("ShadowSocks[%s] proxy listening at: %s", s.Name(), s.Address())
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/atomic"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/sockopt"
 	C "github.com/metacubex/mihomo/constant"
@@ -15,7 +16,7 @@ import (
 
 type UDPListener struct {
 	packetConn net.PacketConn
-	closed     bool
+	closed     atomic.Bool
 }
 
 func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
@@ -28,7 +29,7 @@ func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunne
 		log.Warnln("Failed to Reuse UDP Address: %s", err)
 	}
 
-	sl := &UDPListener{l, false}
+	sl := &UDPListener{packetConn: l}
 	conn := pickCipher.PacketConn(N.NewEnhancePacketConn(l))
 	go func() {
 		for {
@@ -37,7 +38,7 @@ func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunne
 				if put != nil {
 					put()
 				}
-				if sl.closed {
+				if sl.closed.Load() {
 					break
 				}
 				continue
@@ -50,7 +51,7 @@ func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunne
 }
 
 func (l *UDPListener) Close() error {
-	l.closed = true
+	l.closed.Store(true)
 	return l.packetConn.Close()
 }
 

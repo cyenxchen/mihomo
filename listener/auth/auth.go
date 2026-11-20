@@ -1,23 +1,26 @@
 package auth
 
 import (
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/auth"
 )
 
 type authStore struct {
-	authenticator auth.Authenticator
+	authenticator atomic.TypedValue[auth.Authenticator]
 }
 
 func (a *authStore) Authenticator() auth.Authenticator {
-	return a.authenticator
+	return a.authenticator.Load()
 }
 
 func (a *authStore) SetAuthenticator(authenticator auth.Authenticator) {
-	a.authenticator = authenticator
+	a.authenticator.Store(authenticator)
 }
 
 func NewAuthStore(authenticator auth.Authenticator) auth.AuthStore {
-	return &authStore{authenticator}
+	store := &authStore{}
+	store.SetAuthenticator(authenticator)
+	return store
 }
 
 var Default auth.AuthStore = NewAuthStore(nil)

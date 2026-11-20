@@ -1,8 +1,11 @@
 package tproxy
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"os"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/common/pool"
@@ -12,10 +15,12 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+// ErrTransparentUDPPermission distinguishes socket configuration from UDP bind failures.
+var ErrTransparentUDPPermission = errors.New("permission denied configuring transparent UDP")
+
 type UDPListener struct {
 	packetConn net.PacketConn
 	addr       string
-	closed     bool
 }
 
 // RawAddress implements C.Listener
@@ -30,7 +35,6 @@ func (l *UDPListener) Address() string {
 
 // Close implements C.Listener
 func (l *UDPListener) Close() error {
-	l.closed = true
 	return l.packetConn.Close()
 }
 
@@ -54,12 +58,14 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 	c := l.(*net.UDPConn)
 
 	rc, err := c.SyscallConn()
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = setsockopt(rc, addr)
+		if errors.Is(err, os.ErrPermission) {
+			err = fmt.Errorf("%w: %w", ErrTransparentUDPPermission, err)
+		}
 	}
-
-	err = setsockopt(rc, addr)
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
@@ -70,7 +76,7 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 			n, oobn, _, lAddr, err := c.ReadMsgUDPAddrPort(buf, oob)
 			if err != nil {
 				pool.Put(buf)
-				if rl.closed {
+				if errors.Is(err, net.ErrClosed) {
 					break
 				}
 				continue

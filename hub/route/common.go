@@ -124,6 +124,9 @@ func wsUpgrade(r *http.Request, w http.ResponseWriter) (conn net.Conn, rw *bufio
 	header.Write(rw.Writer)
 	rw.Writer.WriteString("\r\n")
 	err = rw.Writer.Flush()
+	if err != nil {
+		_ = conn.Close()
+	}
 
 	return conn, rw, err
 }

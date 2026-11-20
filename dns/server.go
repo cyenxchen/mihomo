@@ -2,8 +2,12 @@ package dns
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
+	"sync"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/sockopt"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
@@ -13,16 +17,18 @@ import (
 )
 
 var (
-	address string
-	server  = &Server{}
+	serverMu   sync.Mutex
+	address    string
+	listenMark int
+	server     = &Server{}
 
 	dnsDefaultTTL uint32 = 600
 )
 
 type Server struct {
-	service   resolver.Service
-	tcpServer *D.Server
-	udpServer *D.Server
+	service   atomic.TypedValue[resolver.Service]
+	tcpServer *dnsEndpoint
+	udpServer *dnsEndpoint
 }
 
 type serverHandler struct {
@@ -32,7 +38,7 @@ type serverHandler struct {
 
 // ServeDNS implement D.Handler ServeDNS
 func (s serverHandler) ServeDNS(w D.ResponseWriter, r *D.Msg) {
-	msg, err := s.service.ServeMsg(context.Background(), r)
+	msg, err := s.service.Load().ServeMsg(context.Background(), r)
 	if err != nil {
 		m := new(D.Msg)
 		m.SetRcode(r, D.RcodeServerFailure)
@@ -58,73 +64,113 @@ func (s *Server) TCPHandler() D.Handler {
 }
 
 func (s *Server) SetService(service resolver.Service) {
-	s.service = service
+	s.service.Store(service)
 }
 
 func ReCreateServer(addr string, lc C.InboundListenConfig, service resolver.Service) {
-	if addr == address && service != nil {
-		server.SetService(service)
-		return
+	if err, ok := EnsureServer(addr, lc, service).(*net.AddrError); ok {
+		log.Errorln("Start DNS server error: %s", err)
 	}
+}
 
-	if server.tcpServer != nil {
-		_ = server.tcpServer.Shutdown()
-		server.tcpServer = nil
+// EnsureServer retains healthy sockets and retries any missing DNS transport.
+func EnsureServer(addr string, lc C.InboundListenConfig, service resolver.Service) error {
+	serverMu.Lock()
+	defer serverMu.Unlock()
+
+	mark := 0
+	if marked, ok := lc.(interface{ RouteMark() int }); ok {
+		mark = marked.RouteMark()
 	}
-
-	if server.udpServer != nil {
-		_ = server.udpServer.Shutdown()
-		server.udpServer = nil
+	if addr != address || mark != listenMark || service == nil || lc == nil {
+		server.tcpServer.stop()
+		server.udpServer.stop()
+		server = &Server{}
+		address = ""
 	}
-
-	server.service = nil
-	address = ""
-
-	if addr == "" || lc == nil || service == nil {
-		return
-	}
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start DNS server error: %s", err.Error())
-		}
-	}()
 
 	_, port, err := net.SplitHostPort(addr)
-	if port == "0" || port == "" || err != nil {
-		return
+	if addr == "" || port == "0" || lc == nil || service == nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if port == "" {
+		return &net.AddrError{Err: "missing port in address", Addr: addr}
 	}
 
-	address = addr
-	server = &Server{service: service}
-
-	go func() {
+	address, listenMark = addr, mark
+	server.SetService(service)
+	if !server.udpServer.running() {
 		p, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
-			log.Errorln("Start DNS server(UDP) error: %s", err.Error())
-			return
+			log.Errorln("Start DNS server(UDP) error: %s", err)
+		} else {
+			if err := sockopt.UDPReuseaddr(p); err != nil {
+				log.Warnln("Failed to Reuse UDP Address: %s", err)
+			}
+			server.udpServer = activateDNSListener(&D.Server{Addr: addr, PacketConn: p, Handler: server.UDPHandler()}, p, "UDP")
 		}
-
-		if err := sockopt.UDPReuseaddr(p); err != nil {
-			log.Warnln("Failed to Reuse UDP Address: %s", err)
-		}
-
-		log.Infoln("DNS server(UDP) listening at: %s", p.LocalAddr().String())
-		server.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: server.UDPHandler()}
-		_ = server.udpServer.ActivateAndServe()
-	}()
-
-	go func() {
+	}
+	if !server.tcpServer.running() {
 		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
-			log.Errorln("Start DNS server(TCP) error: %s", err.Error())
-			return
+			log.Errorln("Start DNS server(TCP) error: %s", err)
+		} else {
+			server.tcpServer = activateDNSListener(&D.Server{Addr: addr, Listener: l, Handler: server.TCPHandler()}, l, "TCP")
 		}
+	}
+	if !server.tcpServer.running() || !server.udpServer.running() {
+		return fmt.Errorf("DNS listener at %s is incomplete (TCP=%t, UDP=%t)", addr, server.tcpServer.running(), server.udpServer.running())
+	}
+	return nil
+}
 
-		log.Infoln("DNS server(TCP) listening at: %s", l.Addr().String())
-		server.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: server.TCPHandler()}
-		_ = server.tcpServer.ActivateAndServe()
+type dnsEndpoint struct {
+	server *D.Server
+	done   chan struct{}
+}
+
+func (e *dnsEndpoint) running() bool {
+	if e == nil {
+		return false
+	}
+	select {
+	case <-e.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (e *dnsEndpoint) stop() {
+	if e == nil {
+		return
+	}
+	// Retire both listening sockets even when an old DNS query is still in flight.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = e.server.ShutdownContext(ctx)
+}
+
+func activateDNSListener(srv *D.Server, socket io.Closer, network string) *dnsEndpoint {
+	// Shutdown can only retire a socket after ActivateAndServe marks it started.
+	ready := make(chan struct{})
+	endpoint := &dnsEndpoint{server: srv, done: make(chan struct{})}
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() {
+		if err := srv.ActivateAndServe(); err != nil {
+			_ = socket.Close()
+			log.Errorln("DNS server(%s) error: %s", network, err)
+		}
+		close(endpoint.done)
 	}()
-
+	select {
+	case <-ready:
+		log.Infoln("DNS server(%s) listening at: %s", network, srv.Addr)
+		return endpoint
+	case <-endpoint.done:
+		return nil
+	}
 }

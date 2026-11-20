@@ -44,6 +44,10 @@ func NewListenConfig() *ListenConfig {
 	return &ListenConfig{}
 }
 
+func (l *ListenConfig) RouteMark() int {
+	return l.routeMark
+}
+
 func (l *ListenConfig) SetRouteMark(mark int) {
 	l.routeMark = mark
 }

@@ -63,7 +63,14 @@ func (m *Mixed) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (m *Mixed) Listen(tunnel C.Tunnel) error {
+func (m *Mixed) Listen(tunnel C.Tunnel) (err error) {
+	var started Mixed
+	defer func() {
+		if err != nil {
+			_ = started.Close()
+		}
+	}()
+
 	lc := m.ListenConfig()
 	for _, addr := range strings.Split(m.RawAddress(), ",") {
 		config := LC.AuthServer{
@@ -81,15 +88,17 @@ func (m *Mixed) Listen(tunnel C.Tunnel) error {
 		if err != nil {
 			return err
 		}
-		m.l = append(m.l, l)
+		started.l = append(started.l, l)
 		if m.udp {
 			lUDP, err := socks.NewUDPWithConfig(config, lc, tunnel, m.Additions()...)
 			if err != nil {
 				return err
 			}
-			m.lUDP = append(m.lUDP, lUDP)
+			started.lUDP = append(started.lUDP, lUDP)
 		}
 	}
+	m.l = append(m.l, started.l...)
+	m.lUDP = append(m.lUDP, started.lUDP...)
 	log.Infoln("Mixed(http+socks)[%s] proxy listening at: %s", m.Name(), m.Address())
 	return nil
 }
@@ -109,6 +118,7 @@ func (m *Mixed) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	m.l, m.lUDP = nil, nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

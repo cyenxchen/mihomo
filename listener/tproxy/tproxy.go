@@ -2,6 +2,7 @@ package tproxy
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -14,7 +15,6 @@ import (
 type Listener struct {
 	listener net.Listener
 	addr     string
-	closed   bool
 }
 
 // RawAddress implements C.Listener
@@ -29,7 +29,6 @@ func (l *Listener) Address() string {
 
 // Close implements C.Listener
 func (l *Listener) Close() error {
-	l.closed = true
 	return l.listener.Close()
 }
 
@@ -59,12 +58,11 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 
 	tl := l.(*net.TCPListener)
 	rc, err := tl.SyscallConn()
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = setsockopt(rc, addr)
 	}
-
-	err = setsockopt(rc, addr)
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
@@ -77,7 +75,7 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 		for {
 			c, err := l.Accept()
 			if err != nil {
-				if rl.closed {
+				if errors.Is(err, net.ErrClosed) {
 					break
 				}
 				continue

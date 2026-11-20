@@ -58,7 +58,14 @@ func (h *HTTP) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (h *HTTP) Listen(tunnel C.Tunnel) error {
+func (h *HTTP) Listen(tunnel C.Tunnel) (err error) {
+	var started HTTP
+	defer func() {
+		if err != nil {
+			_ = started.Close()
+		}
+	}()
+
 	lc := h.ListenConfig()
 	for _, addr := range strings.Split(h.RawAddress(), ",") {
 		l, err := http.NewWithConfig(
@@ -80,8 +87,9 @@ func (h *HTTP) Listen(tunnel C.Tunnel) error {
 		if err != nil {
 			return err
 		}
-		h.l = append(h.l, l)
+		started.l = append(started.l, l)
 	}
+	h.l = append(h.l, started.l...)
 	log.Infoln("HTTP[%s] proxy listening at: %s", h.Name(), h.Address())
 	return nil
 }
@@ -95,6 +103,7 @@ func (h *HTTP) Close() error {
 			errs = append(errs, fmt.Errorf("close tcp listener %s err: %w", l.Address(), err))
 		}
 	}
+	h.l = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

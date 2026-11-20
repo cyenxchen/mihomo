@@ -32,6 +32,7 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	defer conn.Close()
 
 	intervalStr := r.URL.Query().Get("interval")
 	interval := 1000
@@ -63,7 +64,12 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 
 	tick := time.NewTicker(time.Millisecond * time.Duration(interval))
 	defer tick.Stop()
-	for range tick.C {
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+		}
 		if err := sendSnapshot(); err != nil {
 			break
 		}
